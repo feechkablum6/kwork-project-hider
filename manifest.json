@@ -1,0 +1,42 @@
+﻿{
+  "manifest_version": 3,
+  "name": "Kwork — скрытие проектов",
+  "version": "1.1.2",
+  "description": "Скрывает ненужные проекты на бирже Kwork и запоминает выбор между сессиями Chrome.",
+  "permissions": [
+    "storage"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://kwork.ru/*"
+      ],
+      "js": [
+        "src/core.js",
+        "src/feed-main.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://kwork.ru/*"
+      ],
+      "js": [
+        "src/core.js",
+        "src/content.js",
+        "src/feed-content.js"
+      ],
+      "css": [
+        "src/content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
+}
