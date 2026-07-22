@@ -2,6 +2,8 @@
 
 <img src="icons/icon-128.png" width="96" alt="kwork-project-hider">
 
+![Кнопки «Скрыть проект» в ленте Kwork](docs/screenshot.png)
+
 Chrome-расширение для биржи [kwork.ru/projects](https://kwork.ru/projects): убирает с ленты ненужные проекты по одному клику и запоминает выбор между сессиями браузера, чтобы не пересматривать одно и то же.
 
 ## Возможности
