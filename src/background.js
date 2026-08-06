@@ -431,10 +431,28 @@ async function sendProjectFile(projectId, file, bytes) {
   return true;
 }
 
+// Адрес файла приходит со страницы, а качает его фоновый скрипт с куками
+// пользователя: чужой адрес увёл бы их на сторону, поэтому качаются только файлы
+// самой биржи.
+const FILE_HOSTS = new Set(['kwork.ru', 'www.kwork.ru', 'cdn-edge.kwork.ru']);
+
+function isKworkFileUrl(value) {
+  try {
+    const url = new URL(String(value));
+    return url.protocol === 'https:' && FILE_HOSTS.has(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 // Ссылка на файл заказа ведёт на kwork.ru и оттуда переадресуется на CDN,
 // который не разрешает межсайтовые запросы. Со страницы такой запрос обрывается,
 // поэтому файлы качает фоновый скрипт: у него есть доступ к обоим адресам.
 async function downloadProjectFile(projectId, item) {
+  if (!isKworkFileUrl(item.url)) {
+    return false;
+  }
+
   const response = await fetch(item.url, { credentials: 'include' });
   if (!response.ok) {
     return false;

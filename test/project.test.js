@@ -228,6 +228,14 @@ test('файлы заказа качает фоновый скрипт, а ст�
   assert.doesNotMatch(pageScript, /arrayBuffer/);
 });
 
+test('файлы качаются только с адресов самой биржи', () => {
+  const background = fs.readFileSync(path.resolve(__dirname, '../src/background.js'), 'utf8');
+
+  assert.match(background, /FILE_HOSTS = new Set\(\['kwork\.ru', 'www\.kwork\.ru', 'cdn-edge\.kwork\.ru'\]\)/);
+  assert.match(background, /if \(!isKworkFileUrl\(item\.url\)\)[\s\S]{0,40}return false;/);
+  assert.match(background, /url\.protocol === 'https:'/);
+});
+
 test('удачно сохранённый заказ не подменяет статус выгрузки переписок', () => {
   const background = fs.readFileSync(path.resolve(__dirname, '../src/background.js'), 'utf8');
 
