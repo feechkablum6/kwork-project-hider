@@ -3,6 +3,8 @@
   --kph-green-hover: #039408;
   --kph-ink: #333333;
   --kph-border: #d8ddd8;
+  --kph-card-border: #dedfe4;
+  --kph-skeleton: #e9ebef;
   --kph-focus: #136fd1;
   --kph-toast: #292d32;
   --kph-z-toast: 1100;
@@ -15,9 +17,11 @@
 .kph-hide-slot {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
   width: auto;
   box-sizing: border-box;
-  padding: 8px 0 0;
+  padding: 0;
+  margin-inline-start: 8px;
   pointer-events: none;
 }
 
@@ -53,6 +57,19 @@
   transform: translateY(1px);
 }
 
+.kph-hide-button[disabled] {
+  border-color: var(--kph-border);
+  background: #f6f7f6;
+  color: #8a908a;
+  cursor: progress;
+}
+
+/* Кнопка извлечения показывает ход работы своей подписью, поэтому её ширина
+   зафиксирована: иначе карточка дёргается на каждом шаге. */
+.kph-extract-button {
+  min-width: 108px;
+}
+
 .kph-hide-button:focus-visible,
 .kph-toast-action:focus-visible {
   outline: 3px solid color-mix(in srgb, var(--kph-focus) 35%, transparent);
@@ -85,19 +102,75 @@
   display: none !important;
 }
 
-.kph-feed-status {
-  min-height: 1px;
-  box-sizing: border-box;
-  color: #666666;
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 20px;
-  text-align: center;
+html[data-kph-feed-rendering='true'] .js-wants-list-preloaders,
+html[data-kph-feed-rendering='true'] .projects-filter__preloader-desktop,
+html[data-kph-feed-rendering='true'] .projects-filter .preloader__bg,
+html[data-kph-feed-rendering='true'] .projects-filter .preloader__ico,
+html[data-kph-feed-rendering='true'] .project-list .preloader__bg,
+html[data-kph-feed-rendering='true'] .project-list .preloader__ico {
+  display: none !important;
 }
 
-.kph-feed-status--visible {
-  min-height: 44px;
-  padding: 12px 16px;
+.kph-feed-skeleton__card {
+  box-sizing: border-box;
+  padding: 15px;
+  margin-bottom: 16px;
+  border: 1px solid var(--kph-card-border);
+  background: #ffffff;
+}
+
+.kph-feed-skeleton__bar {
+  border-radius: 3px;
+  background: var(--kph-skeleton);
+  animation: kph-feed-skeleton-pulse 1400ms ease-in-out infinite;
+}
+
+.kph-feed-skeleton__bar--title {
+  width: 58%;
+  height: 20px;
+  margin-bottom: 16px;
+}
+
+.kph-feed-skeleton__bar--text {
+  width: 100%;
+  height: 12px;
+  margin-bottom: 8px;
+}
+
+.kph-feed-skeleton__bar--text-short {
+  width: 74%;
+  height: 12px;
+  margin-bottom: 30px;
+}
+
+.kph-feed-skeleton__bar--stats {
+  width: 46%;
+  height: 66px;
+  margin-bottom: 26px;
+}
+
+.kph-feed-skeleton__bar--meta {
+  width: 32%;
+  height: 12px;
+}
+
+.kph-feed-skeleton__card:nth-child(2) .kph-feed-skeleton__bar {
+  animation-delay: 140ms;
+}
+
+.kph-feed-skeleton__card:nth-child(3) .kph-feed-skeleton__bar {
+  animation-delay: 280ms;
+}
+
+@keyframes kph-feed-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.45;
+  }
 }
 
 .kph-toast {
@@ -151,6 +224,7 @@
 @media (max-width: 520px) {
   .kph-hide-button {
     width: 44px;
+    min-width: 0;
     min-height: 44px;
     padding: 10px;
   }
@@ -173,5 +247,9 @@
   .kph-is-hiding,
   .kph-toast {
     transition: none;
+  }
+
+  .kph-feed-skeleton__bar {
+    animation: none;
   }
 }

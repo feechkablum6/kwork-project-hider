@@ -125,6 +125,98 @@
     return svg;
   }
 
+  function createExtractIcon() {
+    const namespace = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(namespace, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.classList.add('kph-hide-icon');
+
+    const sheet = document.createElementNS(namespace, 'path');
+    sheet.setAttribute('d', 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z');
+
+    const corner = document.createElementNS(namespace, 'path');
+    corner.setAttribute('d', 'M14 3v5h5');
+
+    const arrow = document.createElementNS(namespace, 'path');
+    arrow.setAttribute('d', 'M12 11v5m0 0-2-2m2 2 2-2');
+
+    svg.append(sheet, corner, arrow);
+    return svg;
+  }
+
+  function setExtractState(button, label, busy) {
+    button.querySelector('.kph-hide-label').textContent = label;
+    button.disabled = busy;
+    button.title = busy ? 'Извлекаю данные заказа' : 'Извлечь данные заказа';
+  }
+
+  function copyPath(path) {
+    navigator.clipboard?.writeText(path).then(
+      () => showToast('Путь скопирован'),
+      () => showToast(`Заказ лежит в папке ${path}`),
+    );
+  }
+
+  function describeProgress(stage, files) {
+    if (stage === 'files') {
+      return files === 1 ? 'Качаю файл…' : 'Качаю файлы…';
+    }
+
+    return 'Извлекаю…';
+  }
+
+  async function extractProject(projectId, button) {
+    const extractor = globalThis.KworkProjectExtractor;
+    if (!extractor) {
+      showToast('Извлечение недоступно: перезагрузите страницу');
+      return;
+    }
+
+    setExtractState(button, 'Извлекаю…', true);
+
+    const result = await extractor.extract(
+      projectId,
+      (stage, files) => setExtractState(button, describeProgress(stage, files), true),
+    );
+
+    setExtractState(button, 'Извлечь', false);
+
+    if (!result?.ok) {
+      showToast(`Не удалось извлечь заказ: ${result?.error || 'мост недоступен'}`);
+      return;
+    }
+
+    const files = result.files > 0 ? `, файлов ${result.savedFiles} из ${result.files}` : '';
+    showToast(
+      `Заказ сохранён${files}`,
+      result.dir ? 'Скопировать путь' : null,
+      result.dir ? () => copyPath(result.dir) : null,
+    );
+  }
+
+  function createExtractButton(projectId) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'kph-hide-button kph-extract-button';
+    button.setAttribute('aria-label', 'Извлечь данные заказа');
+    button.title = 'Извлечь данные заказа';
+    button.append(createExtractIcon());
+
+    const label = document.createElement('span');
+    label.className = 'kph-hide-label';
+    label.textContent = 'Извлечь';
+    button.append(label);
+
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      extractProject(projectId, button);
+    });
+
+    return button;
+  }
+
   function createHideButton(projectId, card) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -185,6 +277,10 @@
   }
 
   function showToast(message, actionLabel, onAction) {
+    if (!document.body) {
+      return;
+    }
+
     removeToast();
 
     const toast = document.createElement('div');
@@ -270,9 +366,9 @@
 
     const slot = document.createElement('div');
     slot.className = 'kph-hide-slot';
-    slot.append(createHideButton(projectId, card));
-    const budgetContainer = core.findBudgetContainer(card);
-    (budgetContainer || card).append(slot);
+    slot.append(createExtractButton(projectId), createHideButton(projectId, card));
+    const actionsContainer = card.querySelector('.want-card__buttons');
+    (actionsContainer || card).append(slot);
 
     if (hiddenProjectIds.has(projectId)) {
       setCardHidden(card, true);
@@ -297,7 +393,16 @@
     });
   }
 
+  function applyHiddenState() {
+    for (const card of document.querySelectorAll('[data-kph-project-id]')) {
+      setCardHidden(card, hiddenProjectIds.has(card.dataset.kphProjectId));
+    }
+  }
+
   async function start() {
+    const observer = new MutationObserver(scheduleScan);
+    observer.observe(document.documentElement || document, { childList: true, subtree: true });
+
     try {
       hiddenProjectIds = new Set(core.normalizeProjectIds(await getStorage()));
     } catch {
@@ -306,9 +411,7 @@
     }
 
     scanProjects();
-
-    const observer = new MutationObserver(scheduleScan);
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    applyHiddenState();
 
     chrome.storage.onChanged.addListener((changes, areaName) => {
       if (areaName !== 'local' || !changes[STORAGE_KEY]) {
@@ -316,9 +419,7 @@
       }
 
       hiddenProjectIds = new Set(core.normalizeProjectIds(changes[STORAGE_KEY].newValue));
-      for (const card of document.querySelectorAll('[data-kph-project-id]')) {
-        setCardHidden(card, hiddenProjectIds.has(card.dataset.kphProjectId));
-      }
+      applyHiddenState();
     });
   }
 
