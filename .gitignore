@@ -1,3 +1,4 @@
 node_modules/
 *.log
 .DS_Store
+native_host/bridge-config.json

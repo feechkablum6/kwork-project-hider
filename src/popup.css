@@ -1,0 +1,149 @@
+:root {
+  --kph-green: #04b70a;
+  --kph-green-hover: #039408;
+  --kph-ink: #333333;
+  --kph-ink-muted: #5f6560;
+  --kph-border: #d8ddd8;
+  --kph-track: #e9ebef;
+  --kph-error: #b3261e;
+  --kph-focus: #136fd1;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 320px;
+  margin: 0;
+  background: #ffffff;
+  color: var(--kph-ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.kph-popup {
+  padding: 18px 16px 16px;
+}
+
+.kph-popup__status {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 22px;
+  text-wrap: balance;
+}
+
+.kph-popup__hint {
+  margin: 6px 0 0;
+  color: var(--kph-ink-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.kph-popup__progress {
+  margin-top: 14px;
+}
+
+.kph-popup__track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--kph-track);
+}
+
+.kph-popup__fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--kph-green);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 200ms ease-out;
+}
+
+.kph-popup__fill--pending {
+  transform: scaleX(0.35);
+  animation: kph-popup-pending 1200ms ease-in-out infinite;
+}
+
+.kph-popup__counter {
+  margin: 8px 0 0;
+  color: var(--kph-ink-muted);
+  font-size: 13px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kph-popup__action {
+  width: 100%;
+  min-height: 40px;
+  margin-top: 16px;
+  padding: 9px 14px;
+  border: 1px solid var(--kph-green);
+  border-radius: 6px;
+  background: var(--kph-green);
+  color: #ffffff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 160ms ease-out, border-color 160ms ease-out, transform 120ms ease-out;
+}
+
+.kph-popup__action:hover {
+  border-color: var(--kph-green-hover);
+  background: var(--kph-green-hover);
+}
+
+.kph-popup__action:active {
+  transform: translateY(1px);
+}
+
+.kph-popup__action:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--kph-focus) 35%, transparent);
+  outline-offset: 2px;
+}
+
+.kph-popup__action--stop {
+  border-color: var(--kph-border);
+  background: #ffffff;
+  color: var(--kph-ink);
+}
+
+.kph-popup__action--stop:hover {
+  border-color: #b9c0b9;
+  background: #f6f7f6;
+}
+
+.kph-popup__error {
+  margin: 12px 0 0;
+  color: var(--kph-error);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+@keyframes kph-popup-pending {
+  0% {
+    transform: translateX(-40%) scaleX(0.35);
+  }
+
+  50% {
+    transform: translateX(60%) scaleX(0.35);
+  }
+
+  100% {
+    transform: translateX(160%) scaleX(0.35);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kph-popup__fill,
+  .kph-popup__action {
+    transition: none;
+  }
+
+  .kph-popup__fill--pending {
+    animation: none;
+    transform: scaleX(0.5);
+  }
+}

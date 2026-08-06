@@ -62,25 +62,6 @@
     return normalizeProjectIds(values).filter((value) => value !== normalizedProjectId);
   }
 
-  function findBudgetContainer(card) {
-    if (!card || typeof card.querySelectorAll !== 'function') {
-      return null;
-    }
-
-    const candidates = [...card.querySelectorAll('div, section, aside, td, header')]
-      .map((element) => ({
-        element,
-        text: String(element.textContent || '').replace(/\s+/g, ' ').trim(),
-      }))
-      .filter(({ text }) => /желаемый\s+бюджет/i.test(text));
-
-    const completeBudgetGroups = candidates.filter(({ text }) => /допустим/i.test(text));
-    const suitableCandidates = completeBudgetGroups.length > 0 ? completeBudgetGroups : candidates;
-    suitableCandidates.sort((left, right) => left.text.length - right.text.length);
-
-    return suitableCandidates[0]?.element || null;
-  }
-
   function mergeProjectPages(...pages) {
     const mergedProjects = [];
     const knownProjectIds = new Set();
@@ -147,7 +128,6 @@
     normalizeProjectIds,
     addProjectId,
     removeProjectId,
-    findBudgetContainer,
     mergeProjectPages,
     getProjectRequestSignature,
     clickPreservingScroll,

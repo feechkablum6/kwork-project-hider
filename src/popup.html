@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Переписки Kwork</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="kph-popup">
+    <p class="kph-popup__status" id="status">Переписки не выгружались</p>
+    <p class="kph-popup__hint" id="hint">Расширение сохранит все диалоги в папку на диске.</p>
+
+    <div class="kph-popup__progress" id="progress" hidden>
+      <div class="kph-popup__track">
+        <div class="kph-popup__fill" id="fill"></div>
+      </div>
+      <p class="kph-popup__counter" id="counter"></p>
+    </div>
+
+    <button class="kph-popup__action" id="action" type="button">Извлечь все переписки</button>
+    <p class="kph-popup__error" id="error" hidden></p>
+  </main>
+  <script src="popup-view.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

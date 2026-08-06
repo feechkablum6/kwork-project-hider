@@ -7,7 +7,6 @@ const {
   normalizeProjectIds,
   addProjectId,
   removeProjectId,
-  findBudgetContainer,
   mergeProjectPages,
   getProjectRequestSignature,
   clickPreservingScroll,
@@ -49,30 +48,6 @@ test('добавляет ID без дубликатов', () => {
 
 test('удаляет выбранный ID', () => {
   assert.deepEqual(removeProjectId(['12', '7'], '12'), ['7']);
-});
-
-test('выбирает минимальный блок, содержащий обе строки бюджета', () => {
-  const wholeCard = { textContent: 'Заголовок Желаемый бюджет: до 3 000 ₽ Допустимый: до 9 000 ₽ Описание проекта' };
-  const budgetColumn = { textContent: 'Желаемый бюджет: до 3 000 ₽ Допустимый: до 9 000 ₽' };
-  const mainBudget = { textContent: 'Желаемый бюджет: до 3 000 ₽' };
-  const card = {
-    querySelectorAll() {
-      return [wholeCard, budgetColumn, mainBudget];
-    },
-  };
-
-  assert.equal(findBudgetContainer(card), budgetColumn);
-});
-
-test('использует основной блок бюджета, если допустимый бюджет отсутствует', () => {
-  const mainBudget = { textContent: 'Желаемый бюджет: до 3 000 ₽' };
-  const card = {
-    querySelectorAll() {
-      return [{ textContent: 'Заголовок и описание проекта' }, mainBudget];
-    },
-  };
-
-  assert.equal(findBudgetContainer(card), mainBudget);
 });
 
 test('объединяет страницы проектов в одну ленту и удаляет дубликаты', () => {

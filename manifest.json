@@ -1,11 +1,24 @@
-﻿{
+{
   "manifest_version": 3,
   "name": "Kwork — скрытие проектов",
-  "version": "1.1.2",
-  "description": "Скрывает ненужные проекты на бирже Kwork и запоминает выбор между сессиями Chrome.",
+  "version": "1.12.0",
+  "description": "Скрывает ненужные проекты на бирже Kwork, извлекает данные заказов и сохраняет переписки с клиентами на диск.",
   "permissions": [
-    "storage"
+    "storage",
+    "nativeMessaging",
+    "tabs"
   ],
+  "host_permissions": [
+    "https://kwork.ru/*",
+    "https://cdn-edge.kwork.ru/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_title": "Переписки Kwork"
+  },
   "content_scripts": [
     {
       "matches": [
@@ -13,7 +26,10 @@
       ],
       "js": [
         "src/core.js",
-        "src/feed-main.js"
+        "src/feed-main.js",
+        "src/inbox-core.js",
+        "src/inbox-main.js",
+        "src/inbox-crawler.js"
       ],
       "run_at": "document_start",
       "world": "MAIN"
@@ -23,14 +39,18 @@
         "https://kwork.ru/*"
       ],
       "js": [
-        "src/core.js",
+        "src/core-isolated.js",
+        "src/inbox-core-isolated.js",
+        "src/project-core.js",
         "src/content.js",
-        "src/feed-content.js"
+        "src/feed-content.js",
+        "src/inbox-content.js",
+        "src/project-content.js"
       ],
       "css": [
         "src/content.css"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     }
   ],
   "icons": {
