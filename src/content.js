@@ -175,12 +175,18 @@
 
     setExtractState(button, 'Извлекаю…', true);
 
-    const result = await extractor.extract(
-      projectId,
-      (stage, files) => setExtractState(button, describeProgress(stage, files), true),
-    );
-
-    setExtractState(button, 'Извлечь', false);
+    let result = null;
+    try {
+      result = await extractor.extract(
+        projectId,
+        (stage, files) => setExtractState(button, describeProgress(stage, files), true),
+      );
+    } catch (error) {
+      // Сбой разбора не должен оставлять кнопку навсегда занятой.
+      result = { ok: false, error: error?.message || 'разбор заказа не удался' };
+    } finally {
+      setExtractState(button, 'Извлечь', false);
+    }
 
     if (!result?.ok) {
       showToast(`Не удалось извлечь заказ: ${result?.error || 'мост недоступен'}`);

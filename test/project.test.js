@@ -106,6 +106,13 @@ test('одинаковые имена файлов заказа разводят
   assert.deepEqual(files.map((item) => item.file), ['бриф.pdf', 'бриф (2).pdf']);
 });
 
+test('битый адрес файла не срывает разбор заказа', () => {
+  const files = core.normalizeProjectFiles([{ url: 'https://kwork.ru/files/%D0%ZZ/бриф.pdf' }, { url: 'https://kwork.ru/files/%E0%A4%A' }]);
+
+  assert.equal(files.length, 2);
+  assert.equal(files[0].file, 'бриф.pdf');
+});
+
 test('markdown заказа содержит всё, что нужно для отклика', () => {
   const project = core.extractProject(buildProjectPage(), { extractedAt: '2026-08-06T09:00:00.000Z' });
   const markdown = core.renderProjectMarkdown(project);

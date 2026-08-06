@@ -86,6 +86,17 @@
     return Number.isFinite(count) ? count : null;
   }
 
+  // Имя файла в адресе закодировано процентами, но биржа встречается и с битой
+  // последовательностью: обычное декодирование на ней падает и уносит с собой
+  // весь разбор заказа, поэтому такой адрес берётся как есть.
+  function decodeUrlPart(value) {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  }
+
   function normalizeProjectFiles(files) {
     const used = new Set();
 
@@ -97,7 +108,7 @@
         }
 
         const name = String(item?.fname || item?.name || '').trim()
-          || decodeURIComponent(url.split('/').pop() || '')
+          || decodeUrlPart(url.split('/').pop() || '')
           || 'файл';
         let file = inboxCore.sanitizeFileName(name) || 'файл';
         const dot = file.lastIndexOf('.');
