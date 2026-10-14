@@ -2,3 +2,7 @@ node_modules/
 *.log
 .DS_Store
 native_host/bridge-config.json
+
+# служебная страница автоперезагрузки расширения при разработке
+dev-reload.html
+dev-reload.js
