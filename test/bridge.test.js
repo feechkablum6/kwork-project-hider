@@ -272,3 +272,128 @@ test('диагностика страницы переписок сохраня�
   assert.equal(record.linksFound, 0);
   assert.ok(record.at);
 });
+
+test('мост отдаёт последнее сохранённое сообщение запрошенных диалогов', () => {
+  const targetDir = createTargetDir();
+  handleCommand(targetDir, {
+    command: 'save-dialog',
+    dialog: buildDialog([
+      { id: '1', time: '2026-07-26T08:00:00.000Z', authorName: 'ivan_petrov', text: 'Старое' },
+      { id: '2', time: '2026-07-26T09:00:00.000Z', authorName: 'ivan_petrov', text: 'Новое' },
+    ]),
+  });
+
+  const result = handleCommand(targetDir, { command: 'dialog-index', dialogKeys: ['Ivan_Petrov', 'nobody', '../evil'] });
+
+  assert.deepEqual(result.dialogs, {
+    ivan_petrov: { lastTime: '2026-07-26T09:00:00.000Z', lastId: '2', count: 2, complete: null },
+  });
+});
+
+test('состояние автовыгрузки ложится служебным файлом', () => {
+  const targetDir = createTargetDir();
+  const result = handleCommand(targetDir, {
+    command: 'sync-status',
+    status: { ok: true, changed: ['ivan_petrov'], error: null },
+  });
+
+  const saved = JSON.parse(fs.readFileSync(result.path, 'utf8'));
+  assert.equal(path.basename(result.path), '_sync.json');
+  assert.equal(saved.ok, true);
+  assert.deepEqual(saved.changed, ['ivan_petrov']);
+  assert.match(saved.at, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test('две одновременные передачи одного вложения не смешивают куски', () => {
+  const targetDir = createTargetDir();
+  const content = Buffer.from('0123456789A', 'utf8');
+  const send = (transferId, part, final, bytes) => handleCommand(targetDir, {
+    command: 'save-attachment',
+    dialogKey: 'ivan_petrov',
+    file: 'архив.zip',
+    transferId,
+    part,
+    final,
+    chunk: bytes.toString('base64'),
+  });
+
+  send('a', 0, false, content.subarray(0, 6));
+  send('b', 0, false, content.subarray(0, 6));
+  send('a', 1, true, content.subarray(6));
+  const late = send('b', 1, true, content.subarray(6));
+
+  const filePath = path.join(targetDir, 'ivan_petrov', 'файлы', 'архив.zip');
+  assert.equal(late.saved, true);
+  assert.equal(fs.readFileSync(filePath, 'utf8'), '0123456789A');
+  assert.deepEqual(fs.readdirSync(path.dirname(filePath)), ['архив.zip']);
+});
+
+test('кусок не по порядку отменяет передачу, а не портит файл', () => {
+  const targetDir = createTargetDir();
+  const send = (part, final, text) => handleCommand(targetDir, {
+    command: 'save-attachment',
+    dialogKey: 'ivan_petrov',
+    file: 'док.txt',
+    transferId: 't1',
+    part,
+    final,
+    chunk: Buffer.from(text).toString('base64'),
+  });
+
+  send(0, false, 'начало');
+  assert.throws(() => send(2, true, 'конец'), /кусок/);
+  assert.equal(fs.existsSync(path.join(targetDir, 'ivan_petrov', 'файлы', 'док.txt')), false);
+});
+
+test('отклики копятся без дублей, новые сверху', () => {
+  const targetDir = createTargetDir();
+  handleCommand(targetDir, { command: 'save-offers', offers: [{ offerId: '1', projectId: '10', price: 5000 }] });
+  const result = handleCommand(targetDir, { command: 'save-offers', offers: [{ offerId: '2', projectId: '20', price: 7000 }, { offerId: '1', projectId: '10', price: 4500 }] });
+
+  const saved = JSON.parse(fs.readFileSync(result.path, 'utf8'));
+  assert.deepEqual(saved.offers.map((item) => [item.offerId, item.price]), [['2', 7000], ['1', 4500]]);
+});
+
+test('мост называет недокачанные вложения по всей сохранённой переписке', () => {
+  const targetDir = createTargetDir();
+  handleCommand(targetDir, {
+    command: 'save-dialog',
+    dialog: buildDialog([
+      { id: '1', time: '2026-07-26T08:00:00.000Z', authorName: 'ivan_petrov', text: 'Старый файл', attachments: [{ id: 'a', name: 'old.png', url: 'https://kwork.ru/files/uploaded/1/old.png', size: 3 }] },
+      { id: '2', time: '2026-07-26T09:00:00.000Z', authorName: 'ivan_petrov', text: 'Новый файл', attachments: [{ id: 'b', name: 'new.png', url: 'https://kwork.ru/files/uploaded/2/new.png', size: 3 }] },
+    ]),
+  });
+
+  const listed = handleCommand(targetDir, { command: 'missing-attachments', dialogKey: 'ivan_petrov' });
+  assert.deepEqual(listed.files.map((item) => item.url), ['https://kwork.ru/files/uploaded/1/old.png', 'https://kwork.ru/files/uploaded/2/new.png']);
+
+  const [newFile] = listed.files.filter((item) => item.url.endsWith('new.png'));
+  handleCommand(targetDir, { command: 'save-attachment', dialogKey: 'ivan_petrov', file: newFile.file, part: 0, final: true, chunk: Buffer.from('png').toString('base64') });
+
+  assert.deepEqual(handleCommand(targetDir, { command: 'missing-attachments', dialogKey: 'ivan_petrov' }).files.map((item) => item.url), ['https://kwork.ru/files/uploaded/1/old.png']);
+  assert.deepEqual(handleCommand(targetDir, { command: 'dialogs-missing-files' }).dialogs, { ivan_petrov: 1 });
+});
+
+test('успешная передача убирает брошенные куски прошлых попыток', () => {
+  const targetDir = createTargetDir();
+  const dir = path.join(targetDir, 'ivan_petrov', 'файлы');
+  fs.mkdirSync(dir, { recursive: true });
+  const stale = path.join(dir, 'архив.zip.old1.part');
+  fs.writeFileSync(stale, 'брошено');
+  const past = new Date(Date.now() - 60 * 60 * 1000);
+  fs.utimesSync(stale, past, past);
+
+  handleCommand(targetDir, { command: 'save-attachment', dialogKey: 'ivan_petrov', file: 'архив.zip', transferId: 'new1', part: 0, final: true, chunk: Buffer.from('zip').toString('base64') });
+
+  assert.deepEqual(fs.readdirSync(dir), ['архив.zip']);
+});
+
+test('мост отдаёт ключи сохранённых сообщений диалога для галочки', () => {
+  const targetDir = createTargetDir();
+  handleCommand(targetDir, { command: 'save-dialog', dialog: buildDialog([
+    { id: '1', time: '2026-10-13T13:19:34.000Z', authorId: '5840', authorName: 'ivan_petrov', text: 'Привет', attachments: [] },
+  ]) });
+
+  assert.deepEqual(handleCommand(targetDir, { command: 'message-keys', dialogKey: 'Ivan_Petrov' }).keys, ['5840:1791897574']);
+  assert.deepEqual(handleCommand(targetDir, { command: 'message-keys', dialogKey: 'nobody' }).keys, []);
+});

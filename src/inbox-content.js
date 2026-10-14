@@ -166,6 +166,7 @@
   // а держать многомегабайтный файл одним сообщением незачем.
   async function sendAttachment(dialogKey, file, bytes) {
     const parts = Math.max(1, Math.ceil(bytes.length / ATTACHMENT_CHUNK_BYTES));
+    const transferId = `tab${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
     for (let part = 0; part < parts; part += 1) {
       const slice = bytes.subarray(part * ATTACHMENT_CHUNK_BYTES, (part + 1) * ATTACHMENT_CHUNK_BYTES);
@@ -173,6 +174,7 @@
         type: 'kph-attachment-chunk',
         dialogKey,
         file,
+        transferId,
         part,
         final: part === parts - 1,
         chunk: toBase64(slice),
@@ -322,6 +324,7 @@
         type: 'kph-crawl-one-done',
         dialogKey: data.dialogKey,
         messages: data.messages || 0,
+        throttled: Boolean(data.throttled),
         reason: data.reason || null,
       });
       return;

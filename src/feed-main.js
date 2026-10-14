@@ -20,6 +20,9 @@
   const COLLECTED_ATTRIBUTE = 'data-kph-feed-collected';
   const COLLECTING_ATTRIBUTE = 'data-kph-feed-collecting';
   const RENDER_DECISION_ATTRIBUTE = 'data-kph-feed-render';
+  const PROJECT_REQUEST_ATTRIBUTE = 'data-kph-project-request';
+  const PROJECT_PAYLOAD_ATTRIBUTE = 'data-kph-project-payload';
+  const KNOWN_PROJECTS_LIMIT = 500;
 
   function installProjectFeedInterceptor(root, options = {}) {
     if (!root || root[INSTALL_KEY]) {
@@ -49,6 +52,9 @@
     const transformedText = new WeakMap();
     const transformedResponse = new WeakMap();
     const activePreloadRequests = new Set();
+    // Лента отдаёт заказ тем же объектом, что и его страница, поэтому она
+    // остаётся источником данных для заказов, страницу которых биржа не открывает.
+    const knownProjects = new Map();
     const state = {
       collectionTimer: null,
       collecting: false,
@@ -103,6 +109,56 @@
       }
 
       return getPagination(payload)?.data;
+    }
+
+    function rememberProjects(projects) {
+      if (!Array.isArray(projects)) {
+        return;
+      }
+
+      for (const project of projects) {
+        const projectId = String(project?.id ?? '').trim();
+        if (!projectId || !project || typeof project !== 'object') {
+          continue;
+        }
+
+        knownProjects.delete(projectId);
+        knownProjects.set(projectId, project);
+      }
+
+      while (knownProjects.size > KNOWN_PROJECTS_LIMIT) {
+        knownProjects.delete(knownProjects.keys().next().value);
+      }
+    }
+
+    function rememberRequestProjects(request) {
+      if (request.readyState !== 4 || request.status < 200 || request.status >= 300) {
+        return;
+      }
+
+      try {
+        rememberProjects(getPageProjects(JSON.parse(responseTextDescriptor.get.call(request))));
+      } catch {
+        // Ответ не разобрался — заказы просто не попадут в память ленты.
+      }
+    }
+
+    // Изолированный мир объявляет номер заказа атрибутом и читает ответ сразу
+    // после события: слушатели обоих миров работают в одном dispatchEvent.
+    function answerProjectRequest() {
+      const documentElement = root.document?.documentElement;
+      const projectId = String(documentElement?.getAttribute?.(PROJECT_REQUEST_ATTRIBUTE) || '').trim();
+      const project = projectId ? knownProjects.get(projectId) : null;
+
+      try {
+        if (!project) {
+          throw new Error('Project is unknown');
+        }
+
+        documentElement?.setAttribute?.(PROJECT_PAYLOAD_ATTRIBUTE, JSON.stringify(project));
+      } catch {
+        documentElement?.removeAttribute?.(PROJECT_PAYLOAD_ATTRIBUTE);
+      }
     }
 
     function isCurrentCollection(metadata) {
@@ -320,6 +376,7 @@
               reject(new Error(`Project page ${page} has an unexpected response`));
               return;
             }
+            rememberProjects(getPageProjects(payload));
             resolve(payload);
           } catch (error) {
             reject(error);
@@ -532,6 +589,8 @@
         setCollectedFlag(false);
       }
 
+      this.addEventListener('loadend', () => rememberRequestProjects(this), { once: true });
+
       const collectionBody = cloneFormData(body, 1);
       const collectionMetadata = createCollectionMetadata(
         collectionBody,
@@ -600,6 +659,7 @@
     root.document.documentElement?.setAttribute('data-kph-feed-ready', 'true');
     root.document.addEventListener?.('kph-feed-start', startLocationCollection);
     root.document.addEventListener?.('kph-feed-render', requestMergedRender);
+    root.document.addEventListener?.('kph-project-request', answerProjectRequest);
     dispatch('kph-feed-ready');
 
     if (options.autoStart === true && !isLatePageEntry()) {

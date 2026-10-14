@@ -1,16 +1,20 @@
 {
   "manifest_version": 3,
   "name": "Kwork — скрытие проектов",
-  "version": "1.12.0",
-  "description": "Скрывает ненужные проекты на бирже Kwork, извлекает данные заказов и сохраняет переписки с клиентами на диск.",
+  "version": "1.19.7",
+  "description": "Скрывает ненужные проекты на бирже Kwork, извлекает данные заказов, показывает ближайшую выплату и сохраняет переписки с клиентами на диск.",
   "permissions": [
     "storage",
     "nativeMessaging",
-    "tabs"
+    "tabs",
+    "cookies",
+    "alarms"
   ],
   "host_permissions": [
     "https://kwork.ru/*",
-    "https://cdn-edge.kwork.ru/*"
+    "https://cdn-edge.kwork.ru/*",
+    "https://kwork-conversation.storage.yandexcloud.net/*",
+    "https://kwork-track.storage.yandexcloud.net/*"
   ],
   "background": {
     "service_worker": "src/background.js"
@@ -29,7 +33,8 @@
         "src/feed-main.js",
         "src/inbox-core.js",
         "src/inbox-main.js",
-        "src/inbox-crawler.js"
+        "src/inbox-crawler.js",
+        "src/ticks-main.js"
       ],
       "run_at": "document_start",
       "world": "MAIN"
@@ -42,10 +47,15 @@
         "src/core-isolated.js",
         "src/inbox-core-isolated.js",
         "src/project-core.js",
+        "src/payout-core.js",
+        "src/payout-source.js",
         "src/content.js",
         "src/feed-content.js",
         "src/inbox-content.js",
-        "src/project-content.js"
+        "src/project-content.js",
+        "src/payout-content.js",
+        "src/report-toggle.js",
+      "src/ticks-content.js"
       ],
       "css": [
         "src/content.css"
@@ -58,5 +68,6 @@
     "32": "icons/icon-32.png",
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAupv/mG5skfltQHMiivKKVDP0T8klNqzDFFveQ+O1ucpCT9KN1wYGULbcvCN5vgtnlKjk+U/YGtmLHpbxNQdYGLlIEhyYVzdFKsBV8HqZ7uPW/MupY91kav1tpTu4woWOFg6Xh0C3N8uZkRzFdND5bEbaiLuBtVaasO2HA5ic9Nb8YmngY4u39GzcTNu4+N2rgjMCdHWXlb8f4zDw3cO8xapKusXkIa03KHNtZB6ngGrE0ClMZxnzjN1iJ3K7tcIuJ0HFQsXtf39zNMDQgDayrJzMCWdsyN80ScExmKerOjprcn7TzJ5RpmiBAJiPIMivcvQYQboawVjwMpPC8xH3swIDAQAB"
 }

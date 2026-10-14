@@ -105,8 +105,8 @@
     }
 
     return {
-      status: 'Переписки не выгружались',
-      hint: 'Расширение сохранит все диалоги в папку на диске.',
+      status: 'Переписки Kwork на диске',
+      hint: 'Кнопка ниже дописывает все диалоги целиком, включая старые.',
       showProgress: false,
       pending: false,
       ratio: 0,
@@ -117,7 +117,38 @@
     };
   }
 
+  const AUTO_SYNC_STALE_MS = 10 * 60 * 1000;
+
+  function formatClock(isoTime) {
+    const date = new Date(isoTime);
+    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+  }
+
+  // Строка про автосохранение: пользователь видит, что новые сообщения ложатся
+  // на диск сами и когда это было в последний раз.
+  function describeAutoSync(state, now = Date.now()) {
+    const at = state?.at ? Date.parse(state.at) : NaN;
+    if (Number.isNaN(at)) {
+      return { text: 'Новые сообщения сохраняются сами каждые 2 минуты.', problem: false };
+    }
+
+    if (state.signedOut) {
+      return { text: 'Автосохранение ждёт входа в Kwork.', problem: true };
+    }
+
+    if (state.ok === false) {
+      return { text: `Автосохранение в ${formatClock(state.at)} не удалось: ${state.error || 'ошибка'}.`, problem: true };
+    }
+
+    if (now - at > AUTO_SYNC_STALE_MS) {
+      return { text: `Автосохранение не шло с ${formatClock(state.at)}.`, problem: true };
+    }
+
+    return { text: `Новые сообщения сохраняются сами, последний раз в ${formatClock(state.at)}.`, problem: false };
+  }
+
   return {
+    describeAutoSync,
     describeCrawlState,
     describeTotals,
     pluralize,

@@ -9,8 +9,8 @@ const { handleCommand } = require('../native_host/store.js');
 
 // Срез настоящей страницы заказа: состояние страницы отдаёт всё нужное одним
 // объектом, вокруг него — соседние поля и вёрстка, как на бирже.
-function buildProjectPage(overrides = {}) {
-  const wantData = {
+function buildWantData(overrides = {}) {
+  return {
     id: 3230953,
     status: 'active',
     altStatusHint: { color: 'blue', title: 'Сбор предложений' },
@@ -42,6 +42,10 @@ function buildProjectPage(overrides = {}) {
     timeLeft: '22 ч. 13 мин.',
     ...overrides,
   };
+}
+
+function buildProjectPage(overrides = {}) {
+  const wantData = buildWantData(overrides);
 
   return `<!DOCTYPE html><html><body><div class="want-card"></div><script>window.stateData = {"maxPortfolioTitle":40,"wantData":${JSON.stringify(wantData)},"designVersion":"2"};</script></body></html>`;
 }
@@ -73,6 +77,18 @@ test('допустимый бюджет не выдумывается, когд�
 
   assert.equal(project.budget.desired, 1500);
   assert.equal(project.budget.maximum, null);
+});
+
+test('заказ из ленты разбирается так же, как со своей страницы', () => {
+  const options = { url: 'https://kwork.ru/projects/3230953/view', extractedAt: '2026-08-22T12:00:00.000Z' };
+  // Лента отдаёт тот же объект заказа плюс свои служебные поля.
+  const fromFeed = core.normalizeProject(
+    buildWantData({ dateView: '2026-08-22 16:50:07', userAlreadyWork: null }),
+    options,
+  );
+
+  assert.deepEqual(fromFeed, core.extractProject(buildProjectPage(), options));
+  assert.equal(fromFeed.files[0].file, 'Техническое_задание.docx');
 });
 
 test('страница без данных заказа не выдаёт пустую заготовку', () => {
@@ -228,6 +244,15 @@ test('файлы заказа качает фоновый скрипт, а ст�
   assert.doesNotMatch(pageScript, /arrayBuffer/);
 });
 
+test('уведённая на список страница заказа не считается заказом, а данные берутся из ленты', () => {
+  const pageScript = fs.readFileSync(path.resolve(__dirname, '../src/project-content.js'), 'utf8');
+
+  assert.match(pageScript, /!response\.ok \|\| response\.redirected/);
+  assert.match(pageScript, /extractProject\([\s\S]{0,60}\|\|\s*readFeedProject/);
+  assert.match(pageScript, /dispatchEvent\(new Event\('kph-project-request'\)\)/);
+  assert.doesNotMatch(pageScript, /данные заказа не распознаны/);
+});
+
 test('файлы качаются только с адресов самой биржи', () => {
   const background = fs.readFileSync(path.resolve(__dirname, '../src/background.js'), 'utf8');
 
@@ -243,7 +268,10 @@ test('удачно сохранённый заказ не подменяет с�
 });
 
 test('папка заказов по умолчанию лежит рядом с папкой переписок', () => {
-  const { projectsDir } = require('../native_host/store.js').resolveDirs('F:\\Projects\\Kwork\\переписки');
+  // Путь берётся от корня текущей системы: разделители папок в Windows и macOS разные,
+  // а проверяется здесь соседство папок, а не написание пути.
+  const kworkDir = path.join(path.resolve('/'), 'Kwork');
+  const { projectsDir } = require('../native_host/store.js').resolveDirs(path.join(kworkDir, 'переписки'));
 
-  assert.equal(projectsDir, path.join('F:\\Projects\\Kwork', 'заказы'));
+  assert.equal(projectsDir, path.join(kworkDir, 'заказы'));
 });

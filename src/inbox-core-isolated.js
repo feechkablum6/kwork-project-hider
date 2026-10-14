@@ -27,6 +27,9 @@
   const DIALOG_KEYS = ['username', 'user_name', 'userName', 'login', 'to_username', 'toUsername'];
   const RECIPIENT_ID_KEYS = ['MSGTO', 'to_id', 'toId', 'recipient_id', 'recipientId'];
   const RECIPIENT_NAME_KEYS = ['mto', 'to_username', 'toUsername', 'recipient_username'];
+  // Идентификатор процитированного сообщения Kwork присылает по-разному:
+  // новый формат — `reply_conversation_id`, старый — `id` или `conversation.id`.
+  const QUOTE_ID_KEYS = ['reply_conversation_id', 'replyConversationId', 'id'];
   const MAX_SCAN_DEPTH = 8;
   // Раскладка папки переписок: диалог = папка с текстом, данными и вложениями.
   const ATTACHMENT_DIR_NAME = 'файлы';
@@ -293,6 +296,37 @@
     return hasTime && (hasAuthor || hasText);
   }
 
+  // Сообщение, отправленное кнопкой «Ответить», несёт исходную реплику в объекте
+  // `quote`; у обычных сообщений он пуст. Из цитаты сохраняются идентификатор,
+  // автор, время и текст — их хватает и на ссылку внутри переписки, и на случай,
+  // когда исходное сообщение в архив не попало.
+  function normalizeQuote(raw) {
+    const quote = raw?.quote;
+    if (!isPlainObject(quote)) {
+      return null;
+    }
+
+    const text = htmlToText(firstFilledKey(quote, TEXT_KEYS));
+    const id = firstFilledKey(quote, QUOTE_ID_KEYS)
+      ?? (isPlainObject(quote.conversation) ? firstFilledKey(quote.conversation, ['id']) : null);
+    if (!text && id === null) {
+      return null;
+    }
+
+    const authorId = firstFilledKey(quote, AUTHOR_ID_KEYS)
+      ?? (isPlainObject(quote.author) ? firstFilledKey(quote.author, ['USERID', 'id']) : null);
+    const authorName = firstFilledKey(quote, AUTHOR_NAME_KEYS)
+      ?? (isPlainObject(quote.author) ? firstFilledKey(quote.author, ['username', 'name']) : null);
+
+    return {
+      id: id === null ? null : String(id),
+      time: normalizeTime(firstFilledKey(quote, TIME_KEYS)),
+      authorId: authorId === null ? null : String(authorId),
+      authorName: authorName === null ? null : String(authorName).trim(),
+      text,
+    };
+  }
+
   function normalizeMessage(raw) {
     if (!isPlainObject(raw)) {
       return null;
@@ -320,10 +354,13 @@
       recipientName: recipientName === null ? null : String(recipientName).trim(),
       text,
       attachments,
+      replyTo: normalizeQuote(raw),
     };
   }
 
-  function collectMessages(payload) {
+  // stats.records — сколько записей сообщений было в ответе до отсева пустых
+  // служебных: по нему судят, полная ли страница пришла.
+  function collectMessages(payload, stats) {
     const found = [];
     const seen = new Set();
 
@@ -337,6 +374,10 @@
       if (Array.isArray(value)) {
         for (const item of value) {
           if (looksLikeMessage(item)) {
+            if (stats) {
+              stats.records = (stats.records || 0) + 1;
+            }
+
             const message = normalizeMessage(item);
             if (message) {
               found.push(message);
@@ -392,10 +433,24 @@
         recipientId: previous.recipientId || message.recipientId,
         recipientName: previous.recipientName || message.recipientName,
         attachments: previous.attachments?.length ? previous.attachments : message.attachments,
+        replyTo: previous.replyTo || message.replyTo || null,
       });
     }
 
-    return [...byNaturalKey.values()];
+    return dropAnonymousCopies([...byNaturalKey.values()]);
+  }
+
+  // Перехват со страницы иногда кладёт реплику без идентификатора и с ником
+  // собеседника вместо автора. Такая копия совпадает с настоящим сообщением по
+  // времени, тексту и идентификатору автора и уступает ему место.
+  function dropAnonymousCopies(messages) {
+    const withId = new Set(messages
+      .filter((message) => message.id && message.authorId)
+      .map((message) => `${message.time || ''}|${message.authorId}|${(message.text || '').trim()}`));
+
+    return messages.filter((message) => message.id
+      || !message.authorId
+      || !withId.has(`${message.time || ''}|${message.authorId}|${(message.text || '').trim()}`));
   }
 
   function mergeMessages(...batches) {
@@ -422,6 +477,7 @@
           ...previous,
           ...message,
           attachments: previous.attachments?.length ? previous.attachments : message.attachments,
+          replyTo: message.replyTo || previous.replyTo || null,
         });
       }
     }
@@ -711,6 +767,347 @@
     return mergeMessages(incomingMessages).filter((message) => !known.has(getMessageKey(message))).length;
   }
 
+  const HISTORY_URL = '/inbox_more_messages';
+  const HISTORY_PAGE_LIMIT = 50;
+  const HISTORY_MAX_PAGES = 200;
+  const HISTORY_BATCH = 4;
+  const HISTORY_PAUSE_MS = 60;
+
+  function isFatalHistoryError(error) {
+    const status = Number(error?.status) || 0;
+    return status === 0 || status === 429 || status >= 500;
+  }
+
+  // Отказ биржи или обрыв сети останавливает весь проход; прочие ошибки
+  // (разбор ответа, мост) касаются одного диалога.
+  function isKworkRefusal(error) {
+    return error?.status !== undefined ? isFatalHistoryError(error) : error instanceof TypeError;
+  }
+
+  // История приходит пачками, а параметр глубины Kwork не публикует: рабочий
+  // вариант ищется один раз и дальше используется как есть. Запрос внедряется
+  // снаружи, поэтому одна реализация служит и вкладке Kwork, и фоновому скрипту.
+  async function loadDialogHistory(options) {
+    const { postForm, dialogKey, userId } = options;
+    const pause = options.pause || (() => Promise.resolve());
+    const isCancelled = options.isCancelled || (() => false);
+    const onProgress = options.onProgress || (() => {});
+    const baseParams = { userId: String(userId), allUnread: 'false', limit: String(HISTORY_PAGE_LIMIT) };
+    if (isCancelled()) {
+      return { messages: [], clientId: String(userId), complete: false, strategy: null, throttled: false };
+    }
+
+    const firstPayload = await postForm(HISTORY_URL, baseParams);
+    const clientId = findParticipantId(firstPayload, dialogKey) || String(userId);
+    const dialogContext = { dialogKey, clientId };
+    let messages = filterDialogMessages(collectMessages(firstPayload), dialogContext);
+    onProgress(messages.length, messages);
+
+    // Ранний выход по числу сообщений ошибается: биржа отдаёт пачку с повторами,
+    // и после дедупа их всегда меньше лимита. Листание продолжается до тех пор,
+    // пока хоть один вариант запроса приносит новые сообщения.
+    let strategy = null;
+    let limitCapped = false;
+    let limitShort = false;
+    // throttled — биржа отказала (429, сбой, обрыв): выше по стеку это повод
+    // остановить весь проход, а не только этот диалог.
+    let throttled = false;
+    const done = (complete) => ({ messages, clientId, complete, strategy, throttled });
+
+    for (let page = 0; page < HISTORY_MAX_PAGES; page += 1) {
+      if (isCancelled()) {
+        return done(false);
+      }
+
+      const state = { loaded: messages.length, oldestId: getOldestMessage(messages)?.id };
+
+      // Смещение не зависит от предыдущего ответа, поэтому такие страницы
+      // забираются пачкой; курсорные варианты остаются последовательными.
+      if (isParallelStrategy(strategy)) {
+        let failed = false;
+        const batch = Array.from({ length: HISTORY_BATCH }, (_, index) => buildHistoryRequest(
+          baseParams,
+          strategy,
+          { ...state, loaded: state.loaded + index * HISTORY_PAGE_LIMIT },
+        )).filter(Boolean);
+
+        const payloads = await Promise.all(batch.map((attempt) => postForm(HISTORY_URL, attempt.params)
+          .then((payload) => filterDialogMessages(collectMessages(payload), dialogContext))
+          .catch((error) => {
+            failed = true;
+            throttled = throttled || isFatalHistoryError(error);
+            return [];
+          })));
+        const incoming = mergeMessages(...payloads);
+        const fresh = countNewMessages(messages, incoming);
+        messages = mergeMessages(messages, incoming);
+
+        // Упавшая страница посреди пачки оставляет дыру: дальнейшее смещение
+        // считалось бы от неполной истории, поэтому листание останавливается,
+        // а история помечается неполной и дочитывается следующим проходом.
+        if (failed) {
+          return done(false);
+        }
+
+        if (fresh === 0) {
+          return done(true);
+        }
+
+        onProgress(messages.length, messages);
+        await pause(HISTORY_PAUSE_MS);
+        continue;
+      }
+
+      const attempts = strategy
+        ? [buildHistoryRequest(baseParams, strategy, state)].filter(Boolean)
+        : buildHistoryProbes(baseParams, state).filter((attempt) => !limitCapped || attempt.strategy !== 'limit');
+
+      let advanced = false;
+      let failed = false;
+
+      for (const attempt of attempts) {
+        if (isCancelled()) {
+          return done(false);
+        }
+
+        let payload;
+        try {
+          payload = await postForm(HISTORY_URL, attempt.params);
+        } catch (error) {
+          // Перегрузка, сбой сервера или сети — не повод перебирать остальные
+          // варианты подряд: так биржа быстрее заблокирует. Неподходящий
+          // параметр (400) — нормальная часть подбора.
+          if (isFatalHistoryError(error)) {
+            throttled = true;
+            return done(false);
+          }
+
+          failed = true;
+          continue;
+        }
+
+        const stats = { records: 0 };
+        const raw = collectMessages(payload, stats);
+        const incoming = filterDialogMessages(raw, dialogContext);
+        // Ответ limit короче запрошенного (и не упёрся в потолок) — это вся
+        // история: старше сообщений нет.
+        if (attempt.strategy === 'limit') {
+          limitShort = stats.records < Math.min(Number(attempt.params.limit), MAX_HISTORY_LIMIT);
+        }
+
+        if (countNewMessages(messages, incoming) === 0) {
+          continue;
+        }
+
+        messages = mergeMessages(messages, incoming);
+        strategy = attempt.strategy;
+        // Другой способ листания пошёл дальше потолка limit — дальше конец
+        // истории решает он: пустая страница курсора и есть конец.
+        if (strategy !== 'limit') {
+          limitCapped = false;
+        }
+
+        advanced = true;
+        onProgress(messages.length, messages);
+        break;
+      }
+
+      if (!advanced) {
+        // Конец истории при листании limit доказывает только короткий ответ:
+        // Kwork отдаёт ровно min(limit, всего) записей (проверено 14.10.2026).
+        // Полный ответ без новых сообщений — потолок или повторы, а не конец:
+        // пробуются остальные способы листания, не нашлось — история неполная.
+        if (strategy === 'limit') {
+          if (limitShort) {
+            return done(!failed);
+          }
+
+          limitCapped = true;
+          strategy = null;
+          continue;
+        }
+
+        return done(!failed && !limitCapped);
+      }
+
+      await pause(HISTORY_PAUSE_MS);
+    }
+
+    return { messages, clientId, complete: false, strategy };
+  }
+
+  // Страница /inbox несёт список последних диалогов готовым массивом в скрипте.
+  // Массив вырезается по скобкам с учётом строк: в тексте сообщений бывают и
+  // скобки, и кавычки, поэтому регулярное выражение здесь ошиблось бы.
+  function extractScriptArray(markup, marker) {
+    const start = markup.indexOf(marker);
+    if (start < 0) {
+      return null;
+    }
+
+    const from = start + marker.length;
+    if (markup[from] !== '[') {
+      return null;
+    }
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let index = from; index < markup.length; index += 1) {
+      const char = markup[index];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === '\\') {
+          escaped = true;
+        } else if (char === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === '"') {
+        inString = true;
+      } else if (char === '[' || char === '{') {
+        depth += 1;
+      } else if (char === ']' || char === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          return markup.slice(from, index + 1);
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function parseChatList(markup) {
+    if (typeof markup !== 'string') {
+      return [];
+    }
+
+    const raw = extractScriptArray(markup, 'window.chatList=');
+    if (!raw) {
+      return [];
+    }
+
+    let list;
+    try {
+      list = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+
+    if (!Array.isArray(list)) {
+      return [];
+    }
+
+    return list
+      .filter((item) => isPlainObject(item) && item.username && item.USERID)
+      .filter((item) => !isServiceDialogKey(item.username) && !item.is_support && !item.is_moderator)
+      .map((item) => ({
+        key: String(item.username).trim(),
+        userId: String(item.USERID),
+        lastTime: normalizeTime(item.time),
+        lastId: item.MID ? String(item.MID) : null,
+        lastFromId: item.MSGFROM ? String(item.MSGFROM) : null,
+        unread: Number(item.unread_count) || 0,
+      }));
+  }
+
+  // Загрузка истории делает сообщения прочитанными у заказчика, а бот
+  // kwork-hunter шлёт уведомление о сообщении, не прочитанном 5 минут. Свежее
+  // непрочитанное поэтому ждёт 10 минут: уведомление уходит, а пользователь
+  // успевает открыть переписку сам.
+  const UNREAD_HOLD_MS = 10 * 60 * 1000;
+
+  function holdFreshUnread(items, now, holdMs = UNREAD_HOLD_MS) {
+    const ready = [];
+    const held = [];
+    for (const item of items || []) {
+      const age = now - Date.parse(item.lastTime);
+      (item.unread > 0 && !(age >= holdMs) ? held : ready).push(item);
+    }
+
+    return { ready, held };
+  }
+
+  // Страница «Мои предложения» несёт отправленные отклики массивом offers
+  // внутри window.stateData: цена строкой в рублях, срок — в секундах.
+  function parseOffers(markup) {
+    if (typeof markup !== 'string') {
+      return [];
+    }
+
+    const raw = extractScriptArray(markup, '"offers":');
+    let list;
+    try {
+      list = raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+
+    return (Array.isArray(list) ? list : [])
+      .filter((item) => isPlainObject(item) && item.id && item.wantId)
+      .map((item) => {
+        const seconds = Number(item.order?.duration) || 0;
+        return {
+          offerId: String(item.id),
+          projectId: String(item.wantId),
+          title: item.want?.name ? String(item.want.name) : null,
+          price: Number(item.order?.price) || null,
+          initialPrice: Number(item.order?.initialOfferPrice) || null,
+          days: seconds > 0 ? Math.round(seconds / 86400) : null,
+          status: item.status ? String(item.status) : null,
+          text: htmlToText(item.comment || ''),
+        };
+      });
+  }
+
+  // Последнее сообщение диалога запоминается по идентификатору: совпало —
+  // в диалоге ничего не произошло, и запрос истории не нужен.
+  function selectChangedDialogs(chatList, seen) {
+    const known = seen || {};
+    return (chatList || []).filter((item) => {
+      const saved = known[String(item.key).toLowerCase()];
+      return !item.lastId || saved !== item.lastId;
+    });
+  }
+
+  // Первая страница приносит 50 последних сообщений. Если даже самое старое из
+  // них новее сохранённого, между ними пропуск, и диалог дочитывается целиком.
+  // Так же дочитывается диалог, полнота которого на диске не подтверждена.
+  // Ключ сообщения «автор:время в секундах» одинаков у страницы Kwork (там
+  // время unix, а id другой) и у сохранённой переписки (там время ISO).
+  function messageKey(authorId, time) {
+    if (authorId === null || authorId === undefined || authorId === '') {
+      return null;
+    }
+
+    const seconds = typeof time === 'number' ? time : Math.floor(Date.parse(time) / 1000);
+    return Number.isFinite(seconds) ? `${authorId}:${seconds}` : null;
+  }
+
+  function savedMessageKeys(messages) {
+    return (Array.isArray(messages) ? messages : [])
+      .map((message) => messageKey(message?.authorId, message?.time))
+      .filter(Boolean);
+  }
+
+  function needsFullHistory(saved, incoming) {
+    if (!saved?.lastTime || saved.complete !== true) {
+      return true;
+    }
+
+    const oldest = getOldestMessage(incoming);
+    if (!oldest?.time) {
+      return false;
+    }
+
+    return Date.parse(oldest.time) > Date.parse(saved.lastTime);
+  }
+
   function formatMessageTime(isoTime) {
     if (!isoTime) {
       return 'без даты';
@@ -788,6 +1185,19 @@
     for (const message of messages) {
       lines.push(`## ${resolveAuthorLabel(message, dialog)} — ${formatMessageTime(message.time)}`);
       lines.push('');
+      if (message.replyTo) {
+        // Подпись цитаты повторяет заголовок исходной реплики слово в слово,
+        // поэтому и человек, и агент находят её простым совпадением строки.
+        const quotedLabel = resolveAuthorLabel(message.replyTo, dialog);
+        lines.push(`> В ответ на сообщение «${quotedLabel} — ${formatMessageTime(message.replyTo.time)}»:`);
+        if (message.replyTo.text) {
+          for (const quotedLine of String(message.replyTo.text).split('\n')) {
+            lines.push(`> ${quotedLine.replace(/^(\s*)(#+)/, '$1\\$2')}`.trimEnd());
+          }
+        }
+        lines.push('');
+      }
+
       if (message.text) {
         // Решётка в начале строки сообщения превратилась бы в заголовок и сбила
         // границы реплик, поэтому она экранируется.
@@ -831,8 +1241,18 @@
     isInboxPage,
     isParallelStrategy,
     isServiceDialogKey,
+    loadDialogHistory,
+    isFatalHistoryError,
+    isKworkRefusal,
     looksLikeMessage,
     mergeMessages,
+    needsFullHistory,
+    messageKey,
+    holdFreshUnread,
+    savedMessageKeys,
+    parseChatList,
+    parseOffers,
+    selectChangedDialogs,
     normalizeMessage,
     normalizeTime,
     renderDialogMarkdown,

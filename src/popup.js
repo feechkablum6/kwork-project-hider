@@ -4,6 +4,7 @@
   const view = globalThis.KworkPopupView;
   const CRAWL_KEY = 'inboxCrawlState';
   const STATUS_KEY = 'inboxBridgeStatus';
+  const SYNC_STATE_KEY = 'inboxSyncState';
 
   const elements = {
     status: document.getElementById('status'),
@@ -13,9 +14,16 @@
     counter: document.getElementById('counter'),
     action: document.getElementById('action'),
     error: document.getElementById('error'),
+    auto: document.getElementById('auto'),
   };
 
   let actionMode = 'start';
+
+  function renderAutoSync(syncState) {
+    const model = view.describeAutoSync(syncState);
+    elements.auto.textContent = model.text;
+    elements.auto.classList.toggle('kph-popup__hint--problem', model.problem);
+  }
 
   function render(state, bridgeStatus) {
     const model = view.describeCrawlState(state);
@@ -37,9 +45,10 @@
   }
 
   function refresh() {
-    chrome.storage.local.get([CRAWL_KEY, STATUS_KEY], (result) => {
+    chrome.storage.local.get([CRAWL_KEY, STATUS_KEY, SYNC_STATE_KEY], (result) => {
       void chrome.runtime.lastError;
       render(result?.[CRAWL_KEY] || {}, result?.[STATUS_KEY] || null);
+      renderAutoSync(result?.[SYNC_STATE_KEY] || null);
     });
   }
 
@@ -64,7 +73,7 @@
   });
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === 'local' && (changes[CRAWL_KEY] || changes[STATUS_KEY])) {
+    if (areaName === 'local' && (changes[CRAWL_KEY] || changes[STATUS_KEY] || changes[SYNC_STATE_KEY])) {
       refresh();
     }
   });

@@ -750,6 +750,67 @@ test('устаревший рендер-клик не подменяет лен�
   );
 });
 
+test('заказ из собранной ленты отдаётся изолированному миру по номеру', async () => {
+  const responses = new Map([
+    [1, createProjectResponse(1, [{ id: 3, name: 'Свежий заказ', description: 'Полное описание' }])],
+    [2, createProjectResponse(2, [{ id: 2 }])],
+    [3, createProjectResponse(3, [{ id: 1 }])],
+  ]);
+  const root = createFakeRoot(responses);
+  installProjectFeedInterceptor(root);
+
+  root.document.dispatchEvent(new Event('kph-feed-start'));
+  root.runTimers();
+  await waitFor(() => root.events.includes('kph-feed-collected'));
+
+  root.document.documentElement.setAttribute('data-kph-project-request', '3');
+  root.document.dispatchEvent(new Event('kph-project-request'));
+
+  const project = JSON.parse(root.getDocumentAttribute('data-kph-project-payload'));
+  assert.equal(project.name, 'Свежий заказ');
+  assert.equal(project.description, 'Полное описание');
+});
+
+test('штатный ответ ленты запоминает заказы без фоновой сборки', async () => {
+  const responses = new Map([
+    ['design:1', createProjectResponse(1, [{ id: 9, name: 'Заказ из штатного ответа' }], 1)],
+  ]);
+  const root = createFakeRoot(responses);
+  installProjectFeedInterceptor(root);
+
+  const request = new root.XMLHttpRequest();
+  request.open('POST', '/projects');
+  request.send(createPageRequest(1, 'design'));
+  await waitFor(() => request.readyState === 4);
+
+  root.document.documentElement.setAttribute('data-kph-project-request', '9');
+  root.document.dispatchEvent(new Event('kph-project-request'));
+
+  assert.equal(
+    JSON.parse(root.getDocumentAttribute('data-kph-project-payload')).name,
+    'Заказ из штатного ответа',
+  );
+});
+
+test('незнакомый номер заказа не отдаёт чужой ответ ленты', async () => {
+  const responses = new Map([
+    [1, createProjectResponse(1, [{ id: 3, name: 'Свежий заказ' }], 1)],
+  ]);
+  const root = createFakeRoot(responses);
+  installProjectFeedInterceptor(root);
+
+  root.document.dispatchEvent(new Event('kph-feed-start'));
+  root.runTimers();
+  await waitFor(() => root.events.includes('kph-feed-collected'));
+
+  root.document.documentElement.setAttribute('data-kph-project-request', '3');
+  root.document.dispatchEvent(new Event('kph-project-request'));
+  root.document.documentElement.setAttribute('data-kph-project-request', '404');
+  root.document.dispatchEvent(new Event('kph-project-request'));
+
+  assert.equal(root.getDocumentAttribute('data-kph-project-payload'), null);
+});
+
 test('слишком большая лента остаётся на штатной пагинации без десятков запросов', async () => {
   const responses = new Map([
     [1, createProjectResponse(1, [{ id: 500 }], 43)],

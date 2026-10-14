@@ -42,6 +42,10 @@ body {
   line-height: 18px;
 }
 
+.kph-popup__hint--problem {
+  color: var(--kph-error);
+}
+
 .kph-popup__progress {
   margin-top: 14px;
 }

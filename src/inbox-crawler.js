@@ -11,14 +11,10 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createInboxCrawlerApi() {
   const INSTALL_KEY = '__kphInboxCrawlerInstalled';
   const MESSAGE_SOURCE = 'kph-inbox';
-  const HISTORY_URL = '/inbox_more_messages';
   const DIALOG_LIST_URLS = ['/inbox_more_dialogs', '/inbox_dialogs', '/new_inbox_more_dialogs'];
-  const PAGE_LIMIT = 50;
-  const MAX_PAGES_PER_DIALOG = 200;
-  const REQUEST_PAUSE_MS = 60;
   const DIALOG_CONCURRENCY = 4;
   const PROFILE_CONCURRENCY = 6;
-  const HISTORY_BATCH = 4;
+  const THROTTLED_REASON = 'Kwork попросил подождать, продолжите выгрузку позже';
 
   function installInboxCrawler(root) {
     if (!root || root[INSTALL_KEY]) {
@@ -62,93 +58,28 @@
       });
 
       if (!response.ok) {
-        throw new Error(`${url} вернул ${response.status}`);
+        const error = new Error(`${url} вернул ${response.status}`);
+        error.status = response.status;
+        throw error;
       }
 
       return response.json();
     }
 
-    // История приходит пачками, а параметр глубины Kwork не публикует:
-    // рабочий вариант ищется один раз и дальше используется как есть.
+    // Листание истории живёт в ядре: тем же алгоритмом пользуется фоновая
+    // автовыгрузка. Здесь только запоминается собственный ник по первой пачке.
     async function loadDialogHistory(dialogKey, userId, onProgress) {
-      const baseParams = { userId: String(userId), allUnread: 'false', limit: String(PAGE_LIMIT) };
-      const firstPayload = await postForm(HISTORY_URL, baseParams);
-      const clientId = core.findParticipantId(firstPayload, dialogKey) || String(userId);
-      const dialogContext = { dialogKey, clientId };
-      let messages = core.filterDialogMessages(core.collectMessages(firstPayload), dialogContext);
-      ownerName = ownerName || core.findOwnerName(messages, dialogKey);
-      onProgress?.(messages.length);
-
-      // Ранний выход по числу сообщений ошибается: биржа отдаёт пачку с повторами,
-      // и после дедупа их всегда меньше лимита. Листание продолжается до тех пор,
-      // пока хоть один вариант запроса приносит новые сообщения.
-      let strategy = null;
-
-      for (let page = 0; page < MAX_PAGES_PER_DIALOG; page += 1) {
-        if (cancelled) {
-          return { messages, clientId, complete: false };
-        }
-
-        const state = { loaded: messages.length, oldestId: core.getOldestMessage(messages)?.id };
-
-        // Смещение не зависит от предыдущего ответа, поэтому такие страницы
-        // забираются пачкой; курсорные варианты остаются последовательными.
-        if (core.isParallelStrategy(strategy)) {
-          const batch = Array.from({ length: HISTORY_BATCH }, (_, index) => core.buildHistoryRequest(
-            baseParams,
-            strategy,
-            { ...state, loaded: state.loaded + index * PAGE_LIMIT },
-          )).filter(Boolean);
-
-          const payloads = await Promise.all(batch.map((attempt) => postForm(HISTORY_URL, attempt.params)
-            .then((payload) => core.filterDialogMessages(core.collectMessages(payload), dialogContext))
-            .catch(() => [])));
-          const incoming = core.mergeMessages(...payloads);
-
-          if (core.countNewMessages(messages, incoming) === 0) {
-            return { messages, clientId, complete: true, strategy };
-          }
-
-          messages = core.mergeMessages(messages, incoming);
-          onProgress?.(messages.length);
-          await pause(REQUEST_PAUSE_MS);
-          continue;
-        }
-
-        const attempts = strategy
-          ? [core.buildHistoryRequest(baseParams, strategy, state)].filter(Boolean)
-          : core.buildHistoryProbes(baseParams, state);
-
-        let advanced = false;
-
-        for (const attempt of attempts) {
-          let payload;
-          try {
-            payload = await postForm(HISTORY_URL, attempt.params);
-          } catch {
-            continue;
-          }
-
-          const incoming = core.filterDialogMessages(core.collectMessages(payload), dialogContext);
-          if (core.countNewMessages(messages, incoming) === 0) {
-            continue;
-          }
-
-          messages = core.mergeMessages(messages, incoming);
-          strategy = attempt.strategy;
-          advanced = true;
-          onProgress?.(messages.length);
-          break;
-        }
-
-        if (!advanced) {
-          return { messages, clientId, complete: true, strategy };
-        }
-
-        await pause(REQUEST_PAUSE_MS);
-      }
-
-      return { messages, clientId, complete: false, strategy };
+      return core.loadDialogHistory({
+        postForm,
+        pause,
+        dialogKey,
+        userId,
+        isCancelled: () => cancelled,
+        onProgress: (count, messages) => {
+          ownerName = ownerName || core.findOwnerName(messages, dialogKey);
+          onProgress?.(count);
+        },
+      });
     }
 
     async function runWithConcurrency(items, limit, worker) {
@@ -431,6 +362,7 @@
           dialog.userId = await resolveUserIdByProfile(dialog.key);
         });
 
+        let throttled = false;
         await runWithConcurrency(dialogs, DIALOG_CONCURRENCY, async (dialog) => {
           if (cancelled) {
             return;
@@ -453,6 +385,14 @@
               report({ stage: 'dialog', done, total, messages: totalMessages + count, dialogKey: dialog.key });
             });
 
+            // Отказ биржи — весь обход останавливается, а не сыплет запросами
+            // дальше. Недочитанное сохраняется с complete:false и дочитывается
+            // автосохранением позже.
+            if (result.throttled) {
+              throttled = true;
+              cancelled = true;
+            }
+
             if (result.messages.length === 0) {
               done += 1;
               report({ stage: 'dialog', done, total, messages: totalMessages, dialogKey: dialog.key });
@@ -468,6 +408,10 @@
               strategy: result.strategy || null,
             });
           } catch (error) {
+            if (core.isKworkRefusal(error)) {
+              throttled = true;
+              cancelled = true;
+            }
             publish('crawl-skipped', { dialogKey: dialog.key, reason: error?.message || 'ошибка запроса' });
           }
 
@@ -475,7 +419,14 @@
           report({ stage: 'dialog', done, total, messages: totalMessages, dialogKey: dialog.key });
         });
 
-        publish('crawl-done', { total, messages: totalMessages, cancelled, pending });
+        publish('crawl-done', {
+          total,
+          messages: totalMessages,
+          cancelled,
+          // После отказа биржи догрузка через страницы диалогов тоже ждёт.
+          pending: throttled ? [] : pending,
+          reason: throttled ? THROTTLED_REASON : undefined,
+        });
       } catch (error) {
         publish('crawl-done', { total: 0, messages: 0, reason: error?.message || 'ошибка выгрузки' });
       } finally {
@@ -511,9 +462,15 @@
           complete: result.complete,
           strategy: result.strategy || null,
         });
-        publish('crawl-one-done', { dialogKey, messages: result.messages.length });
+        publish('crawl-one-done', {
+          dialogKey,
+          messages: result.messages.length,
+          throttled: Boolean(result.throttled),
+          reason: result.throttled ? THROTTLED_REASON : undefined,
+        });
       } catch (error) {
-        publish('crawl-one-done', { dialogKey, reason: error?.message || 'ошибка запроса' });
+        const throttled = core.isKworkRefusal(error);
+        publish('crawl-one-done', { dialogKey, throttled, reason: throttled ? THROTTLED_REASON : error?.message || 'ошибка запроса' });
       }
     }
 

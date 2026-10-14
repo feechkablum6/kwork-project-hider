@@ -202,7 +202,146 @@ test('сообщения находятся в произвольной обёр
     recipientName: null,
     text: 'Привет',
     attachments: [],
+    replyTo: null,
   });
+});
+
+test('ответ на сообщение разбирается из цитаты нового формата', () => {
+  const payload = {
+    messages: [
+      {
+        id: 535722713,
+        MSGFROM: 23848034,
+        time: 1785938396,
+        message: 'Шесть комплектов опубликованы',
+        quote: {
+          reply_conversation_id: 535705352,
+          MSGFROM: '6371073',
+          time: 1785919166,
+          message: '17450 все комплекты стоимость',
+          author: { USERID: 6371073, username: 'Hr_pro' },
+          files: [],
+          isQuote: false,
+        },
+      },
+    ],
+  };
+
+  const [message] = core.collectMessages(payload);
+
+  assert.deepEqual(message.replyTo, {
+    id: '535705352',
+    time: '2026-08-05T08:39:26.000Z',
+    authorId: '6371073',
+    authorName: 'Hr_pro',
+    text: '17450 все комплекты стоимость',
+  });
+});
+
+test('цитата старого формата берёт идентификатор из id или conversation', () => {
+  const [withId, withConversation] = core.collectMessages({
+    messages: [
+      {
+        id: 535244184,
+        MSGFROM: 23848034,
+        time: 1785572100,
+        message: 'Да, растягивать не надо',
+        quote: {
+          id: 535243917,
+          MSGFROM: 5053,
+          time: 1785572025,
+          message: 'Форма сама не растягивалась?',
+          author: { USERID: 5053, username: 'gustav' },
+        },
+      },
+      {
+        id: 535244740,
+        MSGFROM: 23848034,
+        time: 1785572400,
+        message: 'админка',
+        quote: {
+          MSGFROM: 5053,
+          time: 1785572333,
+          message: 'доступы',
+          author: { USERID: 5053, username: 'gustav' },
+          conversation: { id: 535244437, user_from_id: 5053 },
+        },
+      },
+    ],
+  });
+
+  assert.equal(withId.replyTo.id, '535243917');
+  assert.equal(withConversation.replyTo.id, '535244437');
+});
+
+test('пустая цитата не считается ответом', () => {
+  const [message] = core.collectMessages({
+    messages: [
+      { id: 1, MSGFROM: 501, time: 1753000000, message: 'Обычное сообщение', quote: {} },
+    ],
+  });
+
+  assert.equal(message.replyTo, null);
+});
+
+test('склейка не теряет ответ, когда старая запись сохранена без него', () => {
+  const saved = [
+    { id: '2', time: '2026-07-01T11:00:00.000Z', authorId: '777', authorName: null, text: 'удалил', attachments: [] },
+  ];
+  const incoming = [
+    {
+      id: '2',
+      time: '2026-07-01T11:00:00.000Z',
+      authorId: '777',
+      authorName: null,
+      text: 'удалил',
+      attachments: [],
+      replyTo: { id: '1', time: '2026-07-01T10:00:00.000Z', authorId: '501', authorName: 'sobolevs', text: 'Удалите пжс клон' },
+    },
+  ];
+
+  assert.equal(core.mergeMessages(saved, incoming)[0].replyTo.id, '1');
+  assert.equal(core.mergeMessages(incoming, saved)[0].replyTo.id, '1');
+});
+
+test('markdown показывает, на какое сообщение нажат ответ', () => {
+  const markdown = core.renderDialogMarkdown({
+    key: 'sobolevs',
+    title: 'sobolevs',
+    clientId: '3970516',
+    messages: [
+      {
+        id: '1',
+        time: '2026-08-13T10:00:00.000Z',
+        authorId: '3970516',
+        authorName: 'sobolevs',
+        text: 'Удалите пжс клон\n# и проверьте сайт',
+        attachments: [],
+        replyTo: null,
+      },
+      {
+        id: '2',
+        time: '2026-08-13T10:05:00.000Z',
+        authorId: '23848034',
+        authorName: 'AkashiDevelop',
+        text: 'удалил',
+        attachments: [],
+        replyTo: {
+          id: '1',
+          time: '2026-08-13T10:00:00.000Z',
+          authorId: '3970516',
+          authorName: 'sobolevs',
+          text: 'Удалите пжс клон\n# и проверьте сайт',
+        },
+      },
+    ],
+  });
+
+  assert.match(markdown, /## sobolevs — 13\.08\.2026, 13:00 МСК/);
+  assert.match(
+    markdown,
+    /## Я — [^\n]+\n\n> В ответ на сообщение «sobolevs — 13\.08\.2026, 13:00 МСК»:\n> Удалите пжс клон\n> \\# и проверьте сайт\n\nудалил/,
+  );
 });
 
 test('профили и служебные объекты не принимаются за сообщения', () => {

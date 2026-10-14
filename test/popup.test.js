@@ -6,7 +6,7 @@ const view = require('../src/popup-view.js');
 test('до первой выгрузки попап предлагает извлечь переписки', () => {
   const model = view.describeCrawlState({});
 
-  assert.equal(model.status, 'Переписки не выгружались');
+  assert.equal(model.status, 'Переписки Kwork на диске');
   assert.equal(model.actionLabel, 'Извлечь все переписки');
   assert.equal(model.showProgress, false);
 });
@@ -83,4 +83,21 @@ test('числительные согласованы с числом', () => {
   assert.equal(view.describeTotals(2, 3), '2 переписки, 3 сообщения');
   assert.equal(view.describeTotals(11, 15), '11 переписок, 15 сообщений');
   assert.equal(view.describeTotals(21, 102), '21 переписка, 102 сообщения');
+});
+
+test('строка автосохранения показывает время последнего прохода', () => {
+  const at = new Date(2026, 9, 14, 12, 41).toISOString();
+  const model = view.describeAutoSync({ ok: true, at }, Date.parse(at) + 60 * 1000);
+
+  assert.equal(model.text, 'Новые сообщения сохраняются сами, последний раз в 12:41.');
+  assert.equal(model.problem, false);
+});
+
+test('строка автосохранения предупреждает о выходе, сбое и простое', () => {
+  const at = new Date(2026, 9, 14, 12, 41).toISOString();
+
+  assert.equal(view.describeAutoSync({ ok: false, signedOut: true, at }).text, 'Автосохранение ждёт входа в Kwork.');
+  assert.equal(view.describeAutoSync({ ok: false, error: 'мост на диск не отвечает', at }, Date.parse(at)).text, 'Автосохранение в 12:41 не удалось: мост на диск не отвечает.');
+  assert.equal(view.describeAutoSync({ ok: true, at }, Date.parse(at) + 30 * 60 * 1000).text, 'Автосохранение не шло с 12:41.');
+  assert.equal(view.describeAutoSync(null).problem, false);
 });
