@@ -14,6 +14,7 @@ import { readJson, resolveChatsDir } from './kwork-shared.mjs';
 
 const require = createRequire(import.meta.url);
 const outbox = require('../native_host/outbox.js');
+const { QUIET_MARK } = require('../native_host/wake-core.js');
 
 const WAKE_LINE = /\[Kwork-побудка #([0-9a-f]{6,20})\] Клиент (\S+) написал/;
 const ORDER_LINE = /^Заказ ([^:\n]+): папка/m;
@@ -48,7 +49,8 @@ export function collectTurn(lines) {
     const text = textOf(entry?.message?.content);
     if (entry?.type === 'user') {
       const match = WAKE_LINE.exec(text);
-      if (match && !wakes.has(match[1])) {
+      // Побудка в чат, где работает пользователь, итога в Telegram не ждёт.
+      if (match && !wakes.has(match[1]) && !text.includes(QUIET_MARK)) {
         wakes.set(match[1], { wakeId: match[1], nick: match[2], order: ORDER_LINE.exec(text)?.[1]?.trim() || null, index });
       }
     } else if (entry?.type === 'assistant' && text.trim()) {

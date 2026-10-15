@@ -978,6 +978,39 @@
     return null;
   }
 
+  // Живой канал Kwork (nginx push stream): страница /inbox называет хост и
+  // личный канал пользователя, по нему сайт сам узнаёт о новых сообщениях.
+  // Канал — ключ доступа к событиям: только в память, не в хранилище и не в лог.
+  const PULL_HOST = /^(?:[a-z0-9-]+\.)*kwork\.ru$/;
+  const PULL_CHANNEL = /^[A-Za-z0-9_-]{8,200}$/;
+  const PULL_INBOX_EVENTS = new Set(['new_inbox', 'inbox_sent']);
+
+  function parsePullSettings(markup) {
+    const block = /pullModuleSettings\s*=\s*\{([^}]*)\}/.exec(String(markup || ''))?.[1] || '';
+    const host = /host\s*:\s*['"]([^'"]+)['"]/.exec(block)?.[1];
+    const channel = /channelId\s*:\s*['"]([^'"]+)['"]/.exec(block)?.[1];
+    if (!host || !channel || !PULL_HOST.test(host) || !PULL_CHANNEL.test(channel)) {
+      return null;
+    }
+
+    return { url: `wss://${host}/ws/public/${channel}` };
+  }
+
+  function parsePullFrame(raw) {
+    try {
+      const frame = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const body = typeof frame?.text === 'string' ? JSON.parse(frame.text) : frame?.text;
+      return isPlainObject(body) && typeof body.event === 'string' ? { event: body.event, data: body.data ?? null } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Новое сообщение собеседника или своё отправленное — переписку пора выгрузить.
+  function isInboxPullEvent(event) {
+    return PULL_INBOX_EVENTS.has(String(event || ''));
+  }
+
   function parseChatList(markup) {
     if (typeof markup !== 'string') {
       return [];
@@ -1230,6 +1263,7 @@
     formatMessageTime,
     htmlToText,
     isInboxPage,
+    isInboxPullEvent,
     isParallelStrategy,
     isServiceDialogKey,
     loadDialogHistory,
@@ -1243,6 +1277,8 @@
     savedMessageKeys,
     parseChatList,
     parseOffers,
+    parsePullFrame,
+    parsePullSettings,
     selectChangedDialogs,
     normalizeMessage,
     normalizeTime,

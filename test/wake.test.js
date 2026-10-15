@@ -141,9 +141,12 @@ test('одна побудка — одни и те же номера коман�
   assert.equal(first.commandId, again.commandId);
   assert.equal(first.messageId, again.messageId);
   assert.match(first.commandId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  // Побудка — служебное сообщение: T3 не считает его сообщением пользователя
+  // (latestUserAuthoredMessageAt), иначе побудки сами продлевали бы «пользователь в чате».
+  assert.equal(first.creationSource, 'server');
 });
 
-function createWorld() {
+function createWorld({ now } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-wake-'));
   const kworkRoot = path.join(home, 'Kwork');
   const targetDir = path.join(kworkRoot, 'переписки');
@@ -154,15 +157,20 @@ function createWorld() {
   const save = (messages) => handleCommand(targetDir, { command: 'save-dialog', dialog: { key: 'ivan', clientId: '501', messages } });
   const sent = [];
   const shell = { projects: [{ id: 'p-shop', workspaceRoot: orderDir }, { id: 'p-root', workspaceRoot: kworkRoot }], threads: [thread('chat', 'p-shop', '2026-10-14T09:00:00Z')] };
+  const chatMessages = {};
   let fail = null;
   const t3 = {
     ...t3Client,
     withT3: async (work) => {
       if (fail) throw new Error(fail);
-      return work({ shell: async () => shell, dispatch: async (command) => { sent.push(command); return { sequence: sent.length }; } });
+      return work({
+        shell: async () => shell,
+        thread: async (threadId) => ({ projection: { messages: chatMessages[threadId] || [] } }),
+        dispatch: async (command) => { sent.push(command); return { sequence: sent.length }; },
+      });
     },
   };
-  const waker = createWaker({ targetDir, kworkRoot, config: {}, t3, push: async () => { throw new Error('в тесте сети нет'); } });
+  const waker = createWaker({ targetDir, kworkRoot, config: {}, t3, push: async () => { throw new Error('в тесте сети нет'); }, ...(now ? { now } : {}) });
   const outboxFiles = () => {
     try {
       return fs.readdirSync(path.join(targetDir, 'data', outbox.OUTBOX_DIR)).map((name) => JSON.parse(fs.readFileSync(path.join(targetDir, 'data', outbox.OUTBOX_DIR, name), 'utf8')));
@@ -170,7 +178,7 @@ function createWorld() {
       return [];
     }
   };
-  return { save, sent, waker, outboxFiles, shell, kworkRoot, setFail: (value) => { fail = value; } };
+  return { save, sent, waker, outboxFiles, shell, chatMessages, kworkRoot, setFail: (value) => { fail = value; } };
 }
 
 test('первый запуск не будит по старой переписке, новое сообщение клиента будит', async () => {
@@ -202,6 +210,8 @@ test('сбой T3 не теряет побудку; ответ пользова�
   world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'вопрос')]);
   await world.waker.tick();
   assert.equal(world.sent.length, 0);
+  // Агенту не дошло — Telegram страхует.
+  assert.deepEqual(world.outboxFiles().map((item) => [item.kind, item.messages.map((m) => m.id)]), [['client', ['2']]]);
 
   // Пользователь ответил с телефона, пока T3 был закрыт: будить уже незачем.
   world.setFail(null);
@@ -356,4 +366,53 @@ test('клиент без заказа: побудка создаёт его ч�
   assert.notEqual(creates[1].threadId, create.threadId);
   assert.equal(world.sent.at(-1).threadId, creates[1].threadId);
   assert.ok(world.sent.every((command) => command.threadId !== 'podborka'));
+});
+
+test('пользователь работает в чате заказа — сообщение клиента идёт только агенту, затих чат — снова в Telegram', async () => {
+  let clock = Date.parse('2026-10-15T12:00:00Z');
+  const world = createWorld({ now: () => clock });
+  const chatMessage = (at, creationSource, text) => ({ role: 'user', createdBy: 'user', creationSource, text, createdAt: at, updatedAt: at });
+  // Пользователь писал агенту 10 минут назад.
+  world.shell.threads[0].latestUserAuthoredMessageAt = '2026-10-15T11:50:00Z';
+  world.chatMessages.chat = [chatMessage('2026-10-15T11:50:00Z', 'web', 'поправь кнопку')];
+  world.save([message(1, 0, 'me', 'жду')]);
+  await world.waker.tick();
+
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'ещё вопрос')]);
+  await world.waker.tick();
+  assert.equal(world.sent.length, 1);
+  assert.equal(world.sent[0].threadId, 'chat');
+  assert.match(world.sent[0].text, /ещё вопрос/);
+  assert.ok(world.sent[0].text.includes(wakeCore.QUIET_MARK));
+  assert.doesNotMatch(world.sent[0].text, /Последней строкой ответа — «Итог для Telegram/);
+  // Серверу — тихая отметка «доставлено агенту», иначе он сам напомнит через 5 минут.
+  assert.deepEqual(world.outboxFiles().map((item) => [item.kind, item.quiet, item.messages.map((m) => m.id)]), [['client', true, ['2']]]);
+
+  // Час без сообщений пользователя в чате — пользователь отошёл, Telegram снова нужен,
+  // и только с новым сообщением: разобранное агентом не повторяется. Побудка
+  // 5 минут назад сдвинула время чата в T3, но пользователем не считается.
+  clock += 70 * 60 * 1000;
+  const wakeAt = new Date(clock - 5 * 60 * 1000).toISOString();
+  world.shell.threads[0].latestUserAuthoredMessageAt = wakeAt;
+  world.chatMessages.chat.push(chatMessage(wakeAt, 'server', `${wakeCore.WAKE_MARK} #ab12cd] Клиент ivan написал на Kwork.`));
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'ещё вопрос'), message(3, 6, 'client', 'ау')]);
+  await world.waker.tick();
+  assert.equal(world.sent.length, 2);
+  assert.ok(!world.sent[1].text.includes(wakeCore.QUIET_MARK));
+  const loud = world.outboxFiles().filter((item) => !item.quiet);
+  assert.deepEqual(loud.map((item) => [item.kind, item.messages.map((m) => m.id)]), [['client', ['3']]]);
+});
+
+test('побудка в чат, где работает пользователь, не шлёт итог агента в Telegram', async () => {
+  const { runReport } = await import('../scripts/kwork-wake-report.mjs');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-report-quiet-'));
+  const targetDir = path.join(home, 'переписки');
+  const transcript = path.join(home, 't.jsonl');
+  const lines = [
+    { type: 'user', message: { content: `[Kwork-побудка #abc123] Клиент ivan написал на Kwork.\n${wakeCore.QUIET_MARK}` } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'Учёл новое сообщение клиента.' }] } },
+  ];
+  fs.writeFileSync(transcript, lines.map((line) => JSON.stringify(line)).join('\n'));
+  assert.equal(runReport({ session_id: 's2', transcript_path: transcript }, { home, targetDir, stateDir: path.join(home, 'state') }), 0);
+  assert.equal(fs.existsSync(path.join(targetDir, 'data', outbox.OUTBOX_DIR)), false);
 });

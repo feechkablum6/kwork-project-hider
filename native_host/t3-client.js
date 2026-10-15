@@ -158,6 +158,7 @@ async function withT3(work) {
   try {
     return await work({
       shell: () => getJson(origin, session.token, '/api/orchestration/shell'),
+      thread: (threadId, view = 'bounded') => getJson(origin, session.token, `/api/orchestration/threads/${encodeURIComponent(threadId)}/${view}`),
       dispatch: (command) => dispatchCommand(origin, session.token, command),
     });
   } finally {
@@ -165,6 +166,8 @@ async function withT3(work) {
   }
 }
 
+// createdBy T3 у внешнего входа всё равно ставит 'user'; побудку от сообщений
+// пользователя отличает creationSource 'server' (wake-core, isEngaged).
 function messageCommand({ seed, threadId, text }) {
   return {
     type: 'message.dispatch',

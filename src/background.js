@@ -518,7 +518,8 @@ async function saveProject(project) {
   };
 }
 
-// Автовыгрузка: раз в минуту фоновый скрипт сам смотрит список диалогов
+// Автовыгрузка: по событию живого канала Kwork и раз в минуту будильником
+// фоновый скрипт сам смотрит список диалогов
 // Kwork и дописывает на диск новые сообщения. Вкладка Kwork для этого не нужна:
 // запросы уходят с куками пользователя, как со страницы биржи.
 const SYNC_ALARM = 'kph-inbox-sync';
@@ -552,6 +553,18 @@ const MANUAL_CRAWL_QUIET_MS = 2 * 60 * 1000;
 let manualCrawlAt = 0;
 let lastPassEndedAt = 0;
 const ALARM_MIN_GAP_MS = 20 * 1000;
+// Живой канал Kwork: событие о новом сообщении запускает проход сразу. Канал
+// один, простаивает без трафика; минутный будильник — запасной путь, когда
+// канал оборвался или фоновый скрипт усыпили.
+const PULL_DEBOUNCE_MS = 300;
+const PULL_RETRY_MIN_MS = 5 * 1000;
+const PULL_RETRY_MAX_MS = 60 * 1000;
+let pullUrl = null;
+let pullSocket = null;
+let pullRetryMs = PULL_RETRY_MIN_MS;
+let pullRetryTimer = null;
+let pullSyncTimer = null;
+let pullRerun = false;
 
 // Номер ручной выгрузки: отмена его меняет, и ждущий запуск не стартует.
 let crawlGeneration = 0;
@@ -889,12 +902,18 @@ async function syncInbox() {
       throw new Error(`Kwork ответил ${response.status}`);
     }
 
-    const chatList = core.parseChatList(await response.text());
+    const inboxHtml = await response.text();
+    const chatList = core.parseChatList(inboxHtml);
     if (!/kwork\.ru\/(inbox|new_inbox)/.test(response.url) || chatList.length === 0) {
+      // Вышли из Kwork — канал старого входа больше не слушается.
+      closePull();
+      pullRetryMs = PULL_RETRY_MIN_MS;
       await reportSync({ ok: false, signedOut: true, error: 'вход в Kwork не выполнен' });
       await answer(false, 'вход в Kwork не выполнен');
       return;
     }
+
+    connectPull(core.parsePullSettings(inboxHtml)?.url);
 
     // Номера собеседников запоминаются с каждого прохода: по ним запрошенный
     // агентом диалог выгружается, даже когда выпал из 50 свежих.
@@ -1085,10 +1104,91 @@ async function syncInbox() {
     syncRunning = false;
     lastPassEndedAt = Date.now();
     // Пока шёл проход, агенты могли попросить ещё: следующий проход сразу.
-    if (forcedNext.ids.size > 0 || forcedNext.keys.size > 0) {
+    if (forcedNext.ids.size > 0 || forcedNext.keys.size > 0 || pullRerun) {
+      pullRerun = false;
       setTimeout(syncInbox, 0);
     }
   }
+}
+
+// Событие пришло во время прохода — после него будет ещё один: проход мог
+// уже прочитать список диалогов без этого сообщения.
+function syncFromPull(data) {
+  const from = data?.from ? String(data.from) : '';
+  clearTimeout(pullSyncTimer);
+  pullSyncTimer = setTimeout(async () => {
+    if (from) {
+      const userIds = (await storageGet('local', SYNC_USER_IDS_KEY)) || {};
+      const nick = Object.keys(userIds).find((key) => userIds[key] === from);
+      if (nick) forcedNext.keys.add(nick.toLowerCase());
+    }
+
+    if (syncRunning) {
+      pullRerun = true;
+    } else {
+      syncInbox();
+    }
+  }, PULL_DEBOUNCE_MS);
+}
+
+function connectPull(url) {
+  if (!url || (url === pullUrl && pullSocket)) {
+    return;
+  }
+
+  // Канал сменился (новый вход) — старый закрывается.
+  closePull();
+  pullUrl = url;
+  let socket;
+  try {
+    socket = new WebSocket(url);
+  } catch {
+    schedulePullRetry();
+    return;
+  }
+
+  pullSocket = socket;
+  socket.onopen = () => {
+    pullRetryMs = PULL_RETRY_MIN_MS;
+    // Пока канал молчал, сообщения могли прийти: один проход сверяет.
+    syncFromPull(null);
+  };
+  socket.onmessage = (event) => {
+    const frame = core.parsePullFrame(event.data);
+    if (frame && core.isInboxPullEvent(frame.event)) {
+      syncFromPull(frame.data);
+    }
+  };
+  socket.onclose = () => {
+    if (pullSocket === socket) {
+      pullSocket = null;
+      schedulePullRetry();
+    }
+  };
+}
+
+function closePull() {
+  clearTimeout(pullRetryTimer);
+  clearTimeout(pullSyncTimer);
+  pullUrl = null;
+  if (pullSocket) {
+    pullSocket.onclose = null;
+    pullSocket.close();
+    pullSocket = null;
+  }
+}
+
+// Обрыв — повтор с растущей паузой. Канал перестал приниматься (вышли из
+// Kwork) — следующий проход будильника возьмёт новый адрес со страницы.
+function schedulePullRetry() {
+  clearTimeout(pullRetryTimer);
+  const delay = pullRetryMs;
+  pullRetryMs = Math.min(pullRetryMs * 2, PULL_RETRY_MAX_MS);
+  pullRetryTimer = setTimeout(() => {
+    const url = pullUrl;
+    pullUrl = null;
+    connectPull(url);
+  }, delay);
 }
 
 function ensureSyncAlarm() {

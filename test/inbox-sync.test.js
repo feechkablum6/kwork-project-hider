@@ -416,3 +416,21 @@ test('отказ биржи — 429, 5xx и обрыв сети; ошибки р
   assert.equal(core.isKworkRefusal(new SyntaxError('bad json')), false);
   assert.equal(core.isKworkRefusal(new Error('мост не сохранил переписку')), false);
 });
+
+test('живой канал Kwork: адрес берётся со страницы /inbox, чужой хост не принимается', () => {
+  const page = `<script>PullModule.start({\n\t\t\t\t\thost: 'notice.kwork.ru',\n\t\t\t\t\tchannelId: 'cnl_Ab-9_x',\n\t\t\t\t\tuserId: 23848034\n\t\t\t\t});var pullModuleSettings = {\n\t\t\t\t\thost: 'notice.kwork.ru',\n\t\t\t\t\tchannelId: 'cnl_Ab-9_x',\n\t\t\t\t\tuserId: 23848034\n\t\t\t\t};</script>`;
+  assert.deepEqual(core.parsePullSettings(page), { url: 'wss://notice.kwork.ru/ws/public/cnl_Ab-9_x' });
+  assert.equal(core.parsePullSettings(page.replaceAll('notice.kwork.ru', 'evil.example')), null);
+  assert.equal(core.parsePullSettings(page.replaceAll("'cnl_Ab-9_x'", "'cnl_/../x'")), null);
+  assert.equal(core.parsePullSettings('<html>Вход</html>'), null);
+});
+
+test('кадр живого канала: событие и данные, мусор не роняет', () => {
+  const frame = JSON.stringify({ id: 7, channel: 'cnl_x', text: JSON.stringify({ event: 'new_inbox', data: { from: 16961627 } }), tag: 1, time: 'x' });
+  assert.deepEqual(core.parsePullFrame(frame), { event: 'new_inbox', data: { from: 16961627 } });
+  assert.deepEqual(core.parsePullFrame(JSON.stringify({ text: { event: 'inbox_sent', data: {} } })), { event: 'inbox_sent', data: {} });
+  assert.equal(core.parsePullFrame('не json'), null);
+  assert.equal(core.parsePullFrame(JSON.stringify({ text: 'тоже не json' })), null);
+  assert.equal(core.isInboxPullEvent('new_inbox'), true);
+  assert.equal(core.isInboxPullEvent('is_online'), false);
+});

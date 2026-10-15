@@ -171,14 +171,17 @@ function createWaker({ targetDir, kworkRoot, config, t3, push, log = () => {}, n
 
   const claimedDir = path.join(dirtyDir, '.claimed');
 
-  // В Telegram — сообщения клиента, о которых ещё не сообщали.
-  function notifyFresh(state, slug, record, pend) {
+  // В Telegram — сообщения клиента, о которых ещё не сообщали. Тихая запись
+  // (агент получил, пользователь в чате) в Telegram не идёт: робот на сервере
+  // только отмечает сообщения доставленными и сам о них уже не напомнит.
+  function notifyFresh(state, slug, record, pend, { quiet = false } = {}) {
     const notifiedIndex = pend.messages.findIndex((message) => String(message.id) === String(state.notified[slug]));
     const fresh = pend.messages.slice(notifiedIndex + 1);
     if (fresh.length > 0) {
       outbox.enqueue(serviceDir, {
         id: `client:${slug}:${pend.lastId}`,
         kind: 'client',
+        ...(quiet ? { quiet: true } : {}),
         nick: record.key || slug,
         url: record.url || `https://kwork.ru/inbox/${slug}`,
         messages: fresh.map((message) => ({
@@ -238,7 +241,8 @@ function createWaker({ targetDir, kworkRoot, config, t3, push, log = () => {}, n
         continue;
       }
 
-      notifyFresh(state, slug, record, pend);
+      // В Telegram сообщение уходит из побудки: там уже видно, работает ли
+      // пользователь с агентом сам.
       trackPending(state, slug, pend);
     }
 
@@ -264,14 +268,19 @@ function createWaker({ targetDir, kworkRoot, config, t3, push, log = () => {}, n
           }
 
           // Пока ждали T3, клиент мог дописать: тогда будится уже новый состав.
-          const current = trackPending(state, slug, pend);
-          notifyFresh(state, slug, record, pend);
-          item = current;
+          item = trackPending(state, slug, pend);
 
           try {
             const route = wakeCore.planRoute({ orders: ordersForNick(slug), projects: shell.projects, threads: shell.threads, kworkRoot, rootThreadId: state.rootThreads[slug] });
             if (route.kind === 'none') {
               throw new Error('в T3 нет проекта Kwork');
+            }
+
+            // Пользователь в чате с агентом — сообщение только агенту; иначе
+            // Telegram сразу, не дожидаясь T3.
+            const quiet = await userIsWorking(api, route, shell.threads);
+            if (!quiet) {
+              notifyFresh(state, slug, record, pend);
             }
 
             const text = wakeCore.buildWakeText({
@@ -283,6 +292,7 @@ function createWaker({ targetDir, kworkRoot, config, t3, push, log = () => {}, n
               dialogDir: path.join(targetDir, slug),
               chatScript,
               rulesPath,
+              quiet,
             });
             let threadId = route.threadId;
             if (route.kind === 'create') {
@@ -302,17 +312,46 @@ function createWaker({ targetDir, kworkRoot, config, t3, push, log = () => {}, n
 
             await api.dispatch(t3.messageCommand({ seed: item.wakeId, threadId, text }));
             state.handled[slug] = pend.lastId;
+            // Агент получил — Telegram об этих сообщениях уже не нужен, и когда
+            // пользователь отойдёт, они не придут задним числом.
+            if (quiet) notifyFresh(state, slug, record, pend, { quiet: true });
             delete state.pending[slug];
-            log(`побудка ${slug}: ${route.kind}${route.reason ? ` (${route.reason})` : ''}`);
+            log(`побудка ${slug}: ${route.kind}${route.reason ? ` (${route.reason})` : ''}${quiet ? ', без Telegram' : ''}`);
           } catch (error) {
+            // Агенту не дошло — Telegram страхует.
+            notifyFresh(state, slug, record, pend);
             fail(state, slug, item, error);
           }
         }
       });
     } catch (error) {
       for (const [slug, item] of due) {
-        if (state.pending[slug] === item) fail(state, slug, item, error);
+        if (state.pending[slug] !== item) continue;
+        notifyPending(state, slug);
+        fail(state, slug, item, error);
       }
+    }
+  }
+
+  function notifyPending(state, slug) {
+    const record = readRecord(slug);
+    const pend = record ? wakeCore.findPendingWake(record, state.handled[slug]) : null;
+    if (pend) notifyFresh(state, slug, record, pend);
+  }
+
+  // Не прочитали чат — считаем, что пользователя нет: лишний Telegram лучше
+  // пропущенного сообщения.
+  async function userIsWorking(api, route, threads) {
+    if (route.kind !== 'thread' || !wakeCore.mayBeEngaged((threads || []).find((thread) => thread.id === route.threadId), now())) {
+      return false;
+    }
+
+    try {
+      const bounded = await api.thread(route.threadId);
+      return wakeCore.isEngaged(bounded?.projection?.messages, now());
+    } catch (error) {
+      log(`чат ${route.threadId} не прочитан: ${error?.message || error}`);
+      return false;
     }
   }
 

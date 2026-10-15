@@ -10,6 +10,14 @@ const DONE_DIR = 'Выполненные';
 const WAKE_MARK = '[Kwork-побудка';
 const WAKE_TEXT_CHARS = 8000;
 const WAKE_MESSAGE_CHARS = 2500;
+// Пользователь писал в чате, куда идёт побудка, не позже часа назад — он
+// работает с агентом сам, и Telegram ему не нужен.
+const ENGAGED_MS = 60 * 60 * 1000;
+// Сообщения, набранные человеком. Побудки, «Continue where you left off» и
+// прочее, что шлёт сервер, T3 тоже помечает createdBy 'user' — их отличает
+// только источник.
+const HUMAN_SOURCES = new Set(['web', 'mobile']);
+const QUIET_MARK = 'Без Telegram: пользователь сейчас работает в этом чате.';
 
 // Строка списка заказов: «- lombard: stroisnab2007, other (выкладка: да)».
 // Скобки — настройки заказа, а не часть ника.
@@ -155,6 +163,34 @@ function planRoute({ orders, projects, threads, kworkRoot, rootThreadId = null }
     : { kind: 'create', projectId: root.id, root: true, reason: rootReason, order, orders: pool };
 }
 
+// Время в сводке T3 сдвигают и побудки, поэтому по нему видно только, что
+// пользователь точно не писал: старше часа — читать сообщения чата незачем.
+function mayBeEngaged(thread, now) {
+  const moment = thread ? threadMoment(thread) : 0;
+  return moment > 0 && now - moment < ENGAGED_MS;
+}
+
+function lastHumanMessageAt(messages) {
+  let latest = 0;
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (message?.role !== 'user' || message.createdBy !== 'user' || !HUMAN_SOURCES.has(message.creationSource)
+      || String(message.text || '').startsWith(WAKE_MARK)) {
+      continue;
+    }
+
+    latest = Math.max(latest, Date.parse(message.createdAt || message.updatedAt) || 0);
+  }
+
+  return latest;
+}
+
+// Пользователь сам писал в этом чате не позже часа назад. Settled-чаты и
+// новые чаты сюда не попадают, поэтому settled возвращает сообщения в Telegram.
+function isEngaged(messages, now) {
+  const moment = lastHumanMessageAt(messages);
+  return moment > 0 && now - moment < ENGAGED_MS;
+}
+
 const MOMENT_FORMAT = new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
 function formatMoment(isoTime) {
@@ -195,7 +231,7 @@ function routeLines(route) {
   return route.order ? [`Заказ ${route.order.name}: папка ${route.order.dir}.`] : [];
 }
 
-function buildWakeText({ wakeId, nick, record, messages, route, dialogDir, chatScript, rulesPath }) {
+function buildWakeText({ wakeId, nick, record, messages, route, dialogDir, chatScript, rulesPath, quiet = false }) {
   const files = core.resolveAttachmentFiles(record?.messages || []);
   const rendered = [];
   let used = 0;
@@ -225,7 +261,9 @@ function buildWakeText({ wakeId, nick, record, messages, route, dialogDir, chatS
     '"""',
     '',
     `Полная переписка: node ${chatScript} ${nick}`,
-    `Правила побудки: ${rulesPath} — прочитай и действуй по ним. Последней строкой ответа — «Итог для Telegram: …», только в ответе на это сообщение: на дальнейшие сообщения пользователя в этом чате отвечай как обычно, без этой строки.`,
+    quiet
+      ? `Правила побудки: ${rulesPath} — прочитай и действуй по ним. ${QUIET_MARK} Строку «Итог для Telegram» не пиши: ответь пользователю здесь как обычно.`
+      : `Правила побудки: ${rulesPath} — прочитай и действуй по ним. Последней строкой ответа — «Итог для Telegram: …», только в ответе на это сообщение: на дальнейшие сообщения пользователя в этом чате отвечай как обычно, без этой строки.`,
   ].join('\n');
 }
 
@@ -237,13 +275,18 @@ function nextAttemptDelayMs(attempts) {
 module.exports = {
   ACTIVE_DIR,
   DONE_DIR,
+  ENGAGED_MS,
+  QUIET_MARK,
   WAKE_MARK,
   buildWakeText,
   chooseThread,
   findPendingWake,
   formatMoment,
   isClientMessage,
+  isEngaged,
   isSettled,
+  lastHumanMessageAt,
+  mayBeEngaged,
   nextAttemptDelayMs,
   parseOrderLine,
   parseOrderMap,
