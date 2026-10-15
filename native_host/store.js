@@ -102,6 +102,13 @@ function migrateLayout(targetDir) {
   return { migrated };
 }
 
+const WAKE_DIRTY_DIR = 'wake-dirty';
+
+function markDialogDirty(targetDir, slug) {
+  const dirtyDir = ensureDir(path.join(getServiceDir(targetDir), WAKE_DIRTY_DIR));
+  fs.writeFileSync(path.join(dirtyDir, slug), '');
+}
+
 function saveDialog(targetDir, { dialog, sample }) {
   const slug = core.buildDialogSlug(dialog?.key);
   if (!slug) {
@@ -114,6 +121,10 @@ function saveDialog(targetDir, { dialog, sample }) {
 
   ensureDir(targetDir);
   migrateDialogLayout(targetDir, slug);
+
+  // Отметка для будильщика агентов ставится до записи переписки: упади мост
+  // между ними — будильщик просто проверит диалог, где ничего не изменилось.
+  markDialogDirty(targetDir, slug);
 
   const dialogDir = ensureDir(getDialogDir(targetDir, slug));
   const jsonPath = path.join(dialogDir, core.DIALOG_DATA_NAME);
@@ -140,6 +151,9 @@ function saveDialog(targetDir, { dialog, sample }) {
 
   writeFileAtomic(jsonPath, `${JSON.stringify(record, null, 2)}\n`);
   writeFileAtomic(markdownPath, core.renderDialogMarkdown(record));
+  // Вторая отметка — после записи: будильщик, захвативший первую и прочитавший
+  // переписку до записи, увидит новое сообщение по второй на следующем такте.
+  markDialogDirty(targetDir, slug);
 
   return {
     path: markdownPath,
@@ -533,6 +547,7 @@ function handleCommand(dirs, message) {
 }
 
 module.exports = {
+  WAKE_DIRTY_DIR,
   handleCommand,
   listAttachments,
   migrateLayout,

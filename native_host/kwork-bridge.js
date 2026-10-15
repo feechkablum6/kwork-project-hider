@@ -7,6 +7,9 @@ const path = require('node:path');
 const { encodeFrame, decodeFrames } = require('./frames.js');
 const { handleCommand } = require('./store.js');
 const { handleSessionSync } = require('./session-push.js');
+const { createSyncWake } = require('./sync-wake.js');
+const { createWaker } = require('./waker.js');
+const t3Client = require('./t3-client.js');
 
 const CONFIG_PATH = path.join(__dirname, 'bridge-config.json');
 const LOG_PATH = path.join(__dirname, 'bridge.log');
@@ -14,6 +17,8 @@ const LOG_PATH = path.join(__dirname, 'bridge.log');
 let buffer = Buffer.alloc(0);
 let pending = 0;
 let inputClosed = false;
+let syncWake = null;
+let waker = null;
 
 function log(line) {
   try {
@@ -71,6 +76,48 @@ function processSessionSync(message) {
     });
 }
 
+// Заявки агентов слушает только мост постоянного порта фонового скрипта: он
+// присылает subscribe. Одноразовый мост (передача входа) заявки не трогает,
+// иначе забрал бы их и ответил мимо расширения.
+const WAKE_TICK_MS = 1000;
+
+function startSyncWake() {
+  if (syncWake) {
+    return;
+  }
+
+  syncWake = createSyncWake({
+    serviceDir: path.join(readDirs().targetDir, 'data'),
+    send: respond,
+  });
+  const timer = setInterval(() => {
+    try {
+      syncWake.tick();
+    } catch (error) {
+      log(`заявки агентов: ${error?.message || error}`);
+    }
+  }, WAKE_TICK_MS);
+  // Таймер не держит мост: закрылся порт — процесс выходит, как раньше.
+  timer.unref();
+
+  const { targetDir } = readDirs();
+  const config = readConfig();
+  waker = createWaker({
+    targetDir,
+    kworkRoot: String(config.kworkRoot || '').trim() || path.dirname(targetDir),
+    config,
+    t3: t3Client,
+    log,
+  });
+  setInterval(runWaker, WAKER_TICK_MS).unref();
+}
+
+const WAKER_TICK_MS = 2000;
+
+function runWaker() {
+  waker?.tick().catch((error) => log(`будильщик: ${error?.message || error}`));
+}
+
 function processMessage(message) {
   const id = message?.id ?? null;
   if (message?.command === 'syncSession') {
@@ -78,9 +125,34 @@ function processMessage(message) {
     return;
   }
 
+  if (message?.command === 'subscribe') {
+    try {
+      startSyncWake();
+    } catch (error) {
+      log(`заявки агентов не слушаются: ${error?.message || error}`);
+    }
+
+    return;
+  }
+
+  if (message?.command === 'sync-done') {
+    try {
+      syncWake?.done(message);
+      respond({ ok: true, id, command: 'sync-done' });
+    } catch (error) {
+      respond({ ok: false, id, command: 'sync-done', error: error?.message || String(error) });
+    }
+
+    return;
+  }
+
   try {
     const result = handleCommand(readDirs(), message);
     respond({ ok: true, id, command: message?.command || null, ...result });
+    // Новая переписка — будильщик смотрит её сразу, не дожидаясь своего такта.
+    if (message?.command === 'save-dialog') {
+      runWaker();
+    }
   } catch (error) {
     const reason = error?.message || String(error);
     log(`ошибка: ${reason}`);

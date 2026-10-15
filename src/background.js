@@ -33,7 +33,15 @@ function getPort() {
   }
 
   port = chrome.runtime.connectNative(HOST_NAME);
+  // Мост постоянного порта слушает заявки агентов «выгрузи сейчас» и будит
+  // агентов; одноразовые мосты (передача входа) этого не делают.
+  port.postMessage({ command: 'subscribe' });
   port.onMessage.addListener((response) => {
+    if (response?.push === 'sync') {
+      requestSyncNow(response);
+      return;
+    }
+
     const pending = response?.id ? pendingRequests.get(response.id) : null;
     if (pending) {
       pendingRequests.delete(response.id);
@@ -50,6 +58,10 @@ function getPort() {
     // Статус в попапе относится к выгрузке переписок, поэтому удачно сохранённый
     // заказ его не подменяет: о своём результате вкладка сообщает сама.
     if (response?.ok && String(response.command || '').startsWith('save-project')) {
+      return;
+    }
+
+    if (response?.command === 'sync-done') {
       return;
     }
 
@@ -326,6 +338,23 @@ async function startCrawl() {
   }
 
   setCrawlState({ running: true, stage: 'dialogs' });
+  // Новые автопроходы ждут ручную выгрузку, а уже идущий она дожидается сама:
+  // два потока запросов к бирже — прямой путь к 429.
+  manualCrawlAt = Date.now();
+  const generation = crawlGeneration;
+  const idle = await waitForSyncIdle();
+  // Пока ждали, выгрузку могли отменить.
+  if (generation !== crawlGeneration) {
+    return;
+  }
+
+  if (!idle) {
+    manualCrawlAt = 0;
+    setCrawlState({ running: false, error: 'Идёт автосохранение переписок, повторите через минуту' });
+    return;
+  }
+
+  manualCrawlAt = Date.now();
   const response = await sendToTab(auth.tab.id, { type: 'kph-crawl-all' });
   if (!response?.started) {
     setCrawlState({
@@ -336,6 +365,8 @@ async function startCrawl() {
 }
 
 async function cancelCrawl() {
+  crawlGeneration += 1;
+  manualCrawlAt = 0;
   crawlQueue.active = false;
   crawlQueue.keys = [];
   const tab = await findInboxTab();
@@ -487,11 +518,11 @@ async function saveProject(project) {
   };
 }
 
-// Автовыгрузка: раз в две минуты фоновый скрипт сам смотрит список диалогов
+// Автовыгрузка: раз в минуту фоновый скрипт сам смотрит список диалогов
 // Kwork и дописывает на диск новые сообщения. Вкладка Kwork для этого не нужна:
 // запросы уходят с куками пользователя, как со страницы биржи.
 const SYNC_ALARM = 'kph-inbox-sync';
-const SYNC_PERIOD_MINUTES = 2;
+const SYNC_PERIOD_MINUTES = 1;
 const SYNC_SEEN_KEY = 'inboxSyncSeen';
 const SYNC_STATE_KEY = 'inboxSyncState';
 const SYNC_CONCURRENCY = 3;
@@ -504,11 +535,60 @@ const SYNC_FILE_RETRY_KEY = 'inboxFileRetries';
 const SYNC_MAX_FILE_RETRIES = 5;
 const SYNC_MAX_BACKOFF_MINUTES = 60;
 const SYNC_TIMES_KEY = 'inboxSyncTimes';
+const USER_IDS_KEY = 'inboxUserIds';
+// Номера собеседников из списка диалогов пишет только фоновый скрипт — отдельным
+// ключом, чтобы не затирать то, что параллельно запомнила вкладка (USER_IDS_KEY).
+const SYNC_USER_IDS_KEY = 'inboxSyncUserIds';
 const OFFERS_EVERY_MS = 6 * 60 * 1000;
 const FILES_SWEEP_EVERY_MS = 60 * 60 * 1000;
 const SYNC_THROTTLE_PAUSE_MS = 10 * 60 * 1000;
 
 let syncRunning = false;
+// Заявки агентов, которые ждут прохода: ники и номера заявок для ответа мосту.
+const forcedNext = { ids: new Set(), keys: new Set() };
+// Ручная выгрузка идёт в странице Kwork и шлёт прогресс; пока он свежий,
+// автовыгрузка не запускает второй поток запросов к бирже.
+const MANUAL_CRAWL_QUIET_MS = 2 * 60 * 1000;
+let manualCrawlAt = 0;
+let lastPassEndedAt = 0;
+const ALARM_MIN_GAP_MS = 20 * 1000;
+
+// Номер ручной выгрузки: отмена его меняет, и ждущий запуск не стартует.
+let crawlGeneration = 0;
+
+async function waitForSyncIdle(limitMs = 2 * 60 * 1000) {
+  const deadline = Date.now() + limitMs;
+  while (syncRunning && Date.now() < deadline) {
+    await pause(500);
+  }
+
+  return !syncRunning;
+}
+
+function manualCrawlBusy() {
+  return crawlQueue.active || Date.now() - manualCrawlAt < MANUAL_CRAWL_QUIET_MS;
+}
+
+function requestSyncNow(push) {
+  for (const id of push?.requestIds || []) forcedNext.ids.add(String(id));
+  for (const nick of push?.nicks || []) forcedNext.keys.add(String(nick).toLowerCase());
+  if (!syncRunning) {
+    syncInbox();
+  }
+}
+
+function takeForced() {
+  const forced = { ids: [...forcedNext.ids], keys: new Set(forcedNext.keys) };
+  forcedNext.ids.clear();
+  forcedNext.keys.clear();
+  return forced;
+}
+
+async function answerForced(forced, ok, error = null) {
+  if (forced.ids.length > 0) {
+    await request({ command: 'sync-done', requestIds: forced.ids, ok, error });
+  }
+}
 // Общий стоп прохода: после отказа биржи (429, 5xx) его видят и уже
 // запущенные диалоги — листание истории и загрузка файлов прекращаются.
 let syncStopped = false;
@@ -678,7 +758,7 @@ async function syncAttachments(dialogKey, fileRetries) {
   return { saved: savedCount, failed };
 }
 
-async function syncDialog(item, saved, fileRetries) {
+async function syncDialog(item, saved, fileRetries, { files: withFiles = true } = {}) {
   const firstPayload = await postKworkForm('/inbox_more_messages', {
     userId: item.userId,
     allUnread: 'false',
@@ -729,7 +809,7 @@ async function syncDialog(item, saved, fileRetries) {
   }
 
   // После отказа биржи файлы не качаются: это те же запросы к kwork.ru.
-  const files = syncStopped ? { saved: 0, failed: 0 } : await syncAttachments(dialog.key, fileRetries);
+  const files = syncStopped || !withFiles ? { saved: 0, failed: 0 } : await syncAttachments(dialog.key, fileRetries);
   return { ok: true, complete, throttled, files };
 }
 
@@ -769,8 +849,7 @@ async function pauseSync() {
 }
 
 async function syncInbox() {
-  // Ручная выгрузка сама пишет всё подряд; второй поток запросов ей не нужен.
-  if (syncRunning || crawlQueue.active) {
+  if (syncRunning) {
     return;
   }
 
@@ -778,11 +857,26 @@ async function syncInbox() {
   // прохода скрипт уносит его с собой, и следующий будильник начнёт заново.
   syncRunning = true;
   syncStopped = false;
+  const forced = takeForced();
+  let forcedAnswered = false;
+  const answer = async (ok, error = null) => {
+    if (!forcedAnswered) {
+      forcedAnswered = true;
+      await answerForced(forced, ok, error);
+    }
+  };
 
   try {
+    // Ручная выгрузка сама пишет всё подряд; второй поток запросов ей не нужен.
+    if (manualCrawlBusy()) {
+      await answer(false, 'идёт ручная выгрузка переписок');
+      return;
+    }
+
     // Биржа отказала (429, сбой) — весь проход отдыхает, а не только диалог.
     const pausedUntil = (await storageGet('local', SYNC_TIMES_KEY))?.pausedUntil || 0;
     if (Date.now() < pausedUntil) {
+      await answer(false, 'Kwork попросил подождать, повтор через несколько минут');
       return;
     }
 
@@ -798,8 +892,26 @@ async function syncInbox() {
     const chatList = core.parseChatList(await response.text());
     if (!/kwork\.ru\/(inbox|new_inbox)/.test(response.url) || chatList.length === 0) {
       await reportSync({ ok: false, signedOut: true, error: 'вход в Kwork не выполнен' });
+      await answer(false, 'вход в Kwork не выполнен');
       return;
     }
+
+    // Номера собеседников запоминаются с каждого прохода: по ним запрошенный
+    // агентом диалог выгружается, даже когда выпал из 50 свежих.
+    const syncUserIds = { ...(await storageGet('local', SYNC_USER_IDS_KEY) || {}) };
+    let userIdsChanged = false;
+    for (const item of chatList) {
+      if (item.userId && syncUserIds[item.key] !== String(item.userId)) {
+        syncUserIds[item.key] = String(item.userId);
+        userIdsChanged = true;
+      }
+    }
+
+    if (userIdsChanged) {
+      await storageSet('local', { [SYNC_USER_IDS_KEY]: syncUserIds });
+    }
+
+    const userIds = { ...(await storageGet('local', USER_IDS_KEY) || {}), ...syncUserIds };
 
     const seen = { ...(await storageGet('local', SYNC_SEEN_KEY) || {}) };
     const retries = { ...(await storageGet('local', SYNC_RETRY_KEY) || {}) };
@@ -809,11 +921,32 @@ async function syncInbox() {
     // Сорвавшийся диалог (429, обрыв, мост) повторяется с растущей паузой:
     // 2, 4, 8… минут, не реже раза в час, и считается незавершённым, пока
     // история не дочитана — на это смотрит и сверка черновиков.
-    const due = core.selectChangedDialogs(chatList, seen).filter((item) => {
-      const retry = retries[item.key.toLowerCase()];
-      return !retry || now - retry.at >= Math.min(2 ** retry.n, SYNC_MAX_BACKOFF_MINUTES) * 60 * 1000;
+    // Диалог, который запросил агент, пауз повтора не ждёт.
+    const changed = core.selectChangedDialogs(chatList, seen).filter((item) => {
+      const key = item.key.toLowerCase();
+      const retry = retries[key];
+      return forced.keys.has(key) || !retry || now - retry.at >= Math.min(2 ** retry.n, SYNC_MAX_BACKOFF_MINUTES) * 60 * 1000;
     });
-    const { ready: changed, held } = core.holdFreshUnread(due, now);
+    // Запрошенный диалог не в списке свежих (пока Chrome был закрыт, обновились
+    // другие) — выгружается напрямую по номеру собеседника.
+    const listed = new Set(chatList.map((item) => item.key.toLowerCase()));
+    const unknownForced = [];
+    for (const key of forced.keys) {
+      if (listed.has(key)) {
+        continue;
+      }
+
+      const known = Object.entries(userIds).find(([nick]) => nick.toLowerCase() === key);
+      if (known) {
+        changed.push({ key: known[0], userId: known[1], lastId: null });
+      } else {
+        unknownForced.push(key);
+      }
+    }
+
+    // Сообщения читаются сразу: о новом сообщении клиента теперь сообщает
+    // будильщик агентов (мост → Telegram), а не проверка бота «не прочитано».
+    const held = [];
     const savedKeys = [];
     const failedKeys = [];
     const files = { saved: 0, failed: 0 };
@@ -828,7 +961,7 @@ async function syncInbox() {
         throw new Error(index?.error || 'мост на диск не отвечает');
       }
 
-      await runWithConcurrency(changed, SYNC_CONCURRENCY, async (item) => {
+      const processDialog = async (item, withFiles) => {
         // После отказа биржи оставшиеся диалоги ждут следующего прохода без
         // штрафа: они не виноваты, что очередь до них не дошла.
         if (syncStopped) {
@@ -839,7 +972,7 @@ async function syncInbox() {
         const key = item.key.toLowerCase();
         let done = false;
         try {
-          const result = await syncDialog(item, index.dialogs?.[key] || null, fileRetries);
+          const result = await syncDialog(item, index.dialogs?.[key] || null, fileRetries, { files: withFiles });
           files.saved += result.files.saved;
           files.failed += result.files.failed;
           if (result.ok) {
@@ -859,16 +992,41 @@ async function syncInbox() {
         }
 
         if (done) {
-          seen[key] = item.lastId;
+          // Диалог вне списка свежих не знает своего последнего сообщения:
+          // отметку «просмотрено» ему ставит следующий проход по списку.
+          if (item.lastId) seen[key] = item.lastId;
           delete retries[key];
         } else {
           retries[key] = { n: (retries[key]?.n || 0) + 1, at: now };
           failedKeys.push(item.key);
         }
-      });
+      };
 
+      // Запрошенные агентом диалоги — первыми и без файлов: хук агента ждёт
+      // текст переписки, а файлы докачаются следом в этом же проходе.
+      const { forced: first, rest } = core.splitForced(changed, forced.keys);
+      await runWithConcurrency(first, SYNC_CONCURRENCY, (item) => processDialog(item, false));
+      await storageSet('local', { [SYNC_SEEN_KEY]: seen, [SYNC_RETRY_KEY]: retries });
+      const forcedFailed = [
+        ...first.filter((item) => failedKeys.includes(item.key) || skippedKeys.includes(item.key)).map((item) => item.key),
+        ...unknownForced,
+      ];
+      await answer(forcedFailed.length === 0, forcedFailed.length > 0 ? `не дочитаны: ${forcedFailed.join(', ')}` : null);
+
+      for (const item of first) {
+        if (!syncStopped && savedKeys.includes(item.key)) {
+          const result = await syncAttachments(item.key, fileRetries);
+          files.saved += result.saved;
+          files.failed += result.failed;
+        }
+      }
+
+      await runWithConcurrency(rest, SYNC_CONCURRENCY, (item) => processDialog(item, true));
       await storageSet('local', { [SYNC_SEEN_KEY]: seen, [SYNC_RETRY_KEY]: retries });
     }
+
+    // Запрошенного агентом в списке изменений не было: на диске уже свежее.
+    await answer(unknownForced.length === 0, unknownForced.length > 0 ? `диалог не найден на Kwork: ${unknownForced.join(', ')}` : null);
 
 
     // Отметки времени живут в storage: фоновый скрипт засыпает между
@@ -921,16 +1079,23 @@ async function syncInbox() {
       unread: Object.fromEntries(chatList.filter((item) => item.unread > 0).map((item) => [item.key, item.unread])),
     });
   } catch (error) {
+    await answer(false, error?.message || 'ошибка автовыгрузки').catch(() => undefined);
     await reportSync({ ok: false, error: error?.message || 'ошибка автовыгрузки' }).catch(() => undefined);
   } finally {
     syncRunning = false;
+    lastPassEndedAt = Date.now();
+    // Пока шёл проход, агенты могли попросить ещё: следующий проход сразу.
+    if (forcedNext.ids.size > 0 || forcedNext.keys.size > 0) {
+      setTimeout(syncInbox, 0);
+    }
   }
 }
 
 function ensureSyncAlarm() {
   chrome.alarms.get(SYNC_ALARM, (alarm) => {
     void chrome.runtime.lastError;
-    if (!alarm) {
+    // Период мог смениться с новой версией: будильник пересоздаётся.
+    if (!alarm || alarm.periodInMinutes !== SYNC_PERIOD_MINUTES) {
       chrome.alarms.create(SYNC_ALARM, { delayInMinutes: 0.1, periodInMinutes: SYNC_PERIOD_MINUTES });
     }
   });
@@ -938,12 +1103,20 @@ function ensureSyncAlarm() {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === SYNC_ALARM) {
-    syncInbox();
+    // Мост держится открытым портом: через него приходят заявки агентов.
+    getPort();
+    // Проход по заявке агента только что был — будильник его не повторяет.
+    if (Date.now() - lastPassEndedAt >= ALARM_MIN_GAP_MS) {
+      syncInbox();
+    }
   }
 });
 chrome.runtime.onInstalled.addListener(ensureSyncAlarm);
 chrome.runtime.onStartup.addListener(ensureSyncAlarm);
 ensureSyncAlarm();
+// Мост поднимается сразу со стартом фонового скрипта: будильщик агентов и
+// заявки «выгрузи сейчас» живут в нём, пока открыт порт.
+getPort();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'kph-save-dialog' && message.dialog?.key) {
@@ -991,6 +1164,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === 'kph-crawl-progress') {
+    manualCrawlAt = Date.now();
     setCrawlState({ running: true, ...message.progress });
     return false;
   }
@@ -1004,6 +1178,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === 'kph-crawl-done') {
+    manualCrawlAt = 0;
     if (message.diagnostics) {
       post({ command: 'save-diagnostics', diagnostics: message.diagnostics });
     }

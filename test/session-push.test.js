@@ -91,12 +91,12 @@ test('ssh получает тело на вход и пишет файл ато�
     const child = new EventEmitter();
     child.stderr = new EventEmitter();
     let body = '';
-    child.stdin = {
+    child.stdin = Object.assign(new EventEmitter(), {
       end(data) {
         body = data;
         process.nextTick(() => child.emit('close', 0));
       },
-    };
+    });
     child.kill = () => {};
     calls.push({ cmd, args, get body() { return body; } });
     return child;
@@ -107,4 +107,20 @@ test('ssh получает тело на вход и пишет файл ато�
   assert.equal(calls[0].args.at(-2), 'firstbyte');
   assert.equal(calls[0].args.at(-1), "umask 077 && cat > '/srv/k/data/s.json.tmp' && mv '/srv/k/data/s.json.tmp' '/srv/k/data/s.json'");
   assert.equal(calls[0].body, '{"cookie":"a=b"}');
+});
+
+test('ssh закрылся, не дочитав тело: ошибка записи не роняет мост', async () => {
+  const spawnFn = () => {
+    const child = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = Object.assign(new EventEmitter(), {
+      end() {
+        process.nextTick(() => child.stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })));
+      },
+    });
+    child.kill = () => {};
+    return child;
+  };
+
+  await assert.rejects(pushOverSsh({ sshHost: 'firstbyte', path: '/srv/x.json' }, 'тело', spawnFn), /EPIPE/);
 });

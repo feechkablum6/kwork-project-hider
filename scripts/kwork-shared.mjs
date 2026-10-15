@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const core = require('../src/inbox-core.js');
+const wakeCore = require('../native_host/wake-core.js');
 
 export const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ORDER_FILES = ['CLAUDE.md', 'AGENTS.md', 'ROADMAP.md', 'README.md', 'STATE.md'];
@@ -49,8 +50,14 @@ export function normalizeWorkspace(cwd, kworkRoot, home = homedir()) {
       return join(kworkRoot, ...rest);
     }
 
-    const orderDir = join(kworkRoot, 'Активные', repo);
-    return existsSync(orderDir) ? join(orderDir, ...rest) : cwd;
+    for (const folder of [wakeCore.ACTIVE_DIR, wakeCore.DONE_DIR]) {
+      const orderDir = join(kworkRoot, folder, repo);
+      if (existsSync(orderDir)) {
+        return join(orderDir, ...rest);
+      }
+    }
+
+    return cwd;
   }
 
   const claudeWorktrees = join(resolve(kworkRoot), '.claude', 'worktrees');
@@ -73,32 +80,28 @@ export function resolveContext(cwd, kworkRoot) {
     return { mode: 'root' };
   }
 
-  const active = join(root, 'Активные');
-  if (!current.startsWith(`${active}${sep}`)) {
-    return null;
+  // Сданный заказ тоже заказ: прошлый клиент пишет туда же, где работали.
+  for (const folder of [wakeCore.ACTIVE_DIR, wakeCore.DONE_DIR]) {
+    const base = join(root, folder);
+    if (current.startsWith(`${base}${sep}`)) {
+      const name = relative(base, current).split(sep)[0];
+      return name ? { mode: 'order', orderDir: join(base, name), order: name } : null;
+    }
   }
 
-  const name = relative(active, current).split(sep)[0];
-  return name ? { mode: 'order', orderDir: join(active, name), order: name } : null;
+  return null;
 }
 
 // Заказ связан с клиентом строкой в общем списке Kwork/docs/заказы-клиенты.md
 // или ссылкой на переписку в файлах заказа. Ник сверяется со списком
 // сохранённых переписок, поэтому опечатка или случайное слово клиента не породит.
 export function readOrderMap(mapPath) {
-  const map = {};
   if (!mapPath || !existsSync(mapPath)) {
-    return map;
+    return {};
   }
 
-  for (const line of readFileSync(mapPath, 'utf8').split('\n')) {
-    const match = /^-\s+([^:\s]+)\s*:\s*(.+)$/.exec(line.trim());
-    if (match) {
-      map[match[1]] = match[2].split(',').map((nick) => nick.trim()).filter(Boolean);
-    }
-  }
-
-  return map;
+  const parsed = wakeCore.parseOrderMap(readFileSync(mapPath, 'utf8'));
+  return Object.fromEntries(Object.entries(parsed).map(([order, item]) => [order, item.nicks]));
 }
 
 export function findOrderNicks(orderDir, knownSlugs, orderMap = {}) {
@@ -130,15 +133,7 @@ export function findOrderNicks(orderDir, knownSlugs, orderMap = {}) {
   return nicks;
 }
 
-export function isClientMessage(message, record) {
-  const clientId = record?.clientId ? String(record.clientId) : null;
-  if (clientId && message?.authorId) {
-    return String(message.authorId) === clientId;
-  }
-
-  const key = String(record?.key || '').trim().toLowerCase();
-  return Boolean(key) && String(message?.authorName || '').trim().toLowerCase() === key;
-}
+export const { isClientMessage } = wakeCore;
 
 // Время по часам мака: так же его показывает Kwork в браузере пользователя.
 const MOMENT_FORMAT = new Intl.DateTimeFormat('ru-RU', {

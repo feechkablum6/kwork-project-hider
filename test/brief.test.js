@@ -180,7 +180,7 @@ test('хук сводки запускается командой и отдаё�
 
   const result = spawnSync(process.execPath, [path.join(__dirname, '..', 'scripts', 'kwork-brief.mjs')], {
     input: JSON.stringify({ session_id: 'cli1', cwd: world.orderDir, hook_event_name: 'SessionStart' }),
-    env: { ...process.env, HOME: world.home, KPH_CHATS_DIR: world.targetDir },
+    env: { ...process.env, HOME: world.home, KPH_CHATS_DIR: world.targetDir, KPH_FRESH_SYNC_MS: '300' },
     encoding: 'utf8',
   });
 
@@ -189,6 +189,50 @@ test('хук сводки запускается командой и отдаё�
   const output = JSON.parse(result.stdout);
   assert.equal(output.hookSpecificOutput.hookEventName, 'SessionStart');
   assert.match(output.hookSpecificOutput.additionalContext, /Нужен магазин/);
+  // Расширения в тесте нет: сводка честно говорит, что показано сохранённое.
+  assert.match(output.hookSpecificOutput.additionalContext, /Свежую переписку с Kwork сейчас получить не удалось/);
+  assert.deepEqual(fs.readdirSync(path.join(world.targetDir, 'data', 'sync-requests')), []);
+});
+
+test('заявка «выгрузи сейчас» ждёт ответа расширения', async () => {
+  const { requestFreshSync } = await load();
+  const world = createWorld();
+  const requestsDir = path.join(world.targetDir, 'data', 'sync-requests');
+  const doneDir = path.join(world.targetDir, 'data', 'sync-done');
+  // Мост с расширением: увидел заявку — ответил.
+  const responder = setInterval(() => {
+    for (const name of fs.existsSync(requestsDir) ? fs.readdirSync(requestsDir).filter((file) => file.endsWith('.json')) : []) {
+      const request = JSON.parse(fs.readFileSync(path.join(requestsDir, name), 'utf8'));
+      assert.deepEqual(request.nicks, ['ivan']);
+      fs.mkdirSync(doneDir, { recursive: true });
+      fs.writeFileSync(path.join(doneDir, name), JSON.stringify({ id: request.id, ok: true }));
+      fs.rmSync(path.join(requestsDir, name));
+    }
+  }, 20);
+
+  try {
+    assert.deepEqual(await requestFreshSync(world.targetDir, ['ivan'], { timeoutMs: 3000, pollMs: 20 }), { ok: true, error: null });
+  } finally {
+    clearInterval(responder);
+  }
+
+  assert.deepEqual(fs.readdirSync(doneDir), []);
+});
+
+test('в начале сессии агент спрашивает про выкладку, если для заказа не отмечено', async () => {
+  const { runBrief } = await load();
+  const world = createWorld();
+  world.writeDialog([message(1, 0, 'client', 'Привет')]);
+  const mapPath = path.join(world.kworkRoot, 'docs', 'заказы-клиенты.md');
+  fs.mkdirSync(path.dirname(mapPath), { recursive: true });
+  fs.writeFileSync(mapPath, '- shop: ivan\n');
+  const input = { session_id: 'deploy', cwd: world.orderDir, hook_event_name: 'SessionStart' };
+  const options = { home: world.home, kworkRoot: world.kworkRoot, targetDir: world.targetDir, orderMapPath: mapPath, stateDir: path.join(world.home, 'state'), now: Date.parse('2026-10-14T10:00:00Z') };
+  assert.match(runBrief(input, options), /можно ли агенту самому выкладывать/);
+
+  fs.writeFileSync(mapPath, '- shop: ivan (выкладка: нет)\n');
+  assert.doesNotMatch(runBrief(input, options), /можно ли агенту самому выкладывать/);
+  assert.match(runBrief(input, options), /Привет/);
 });
 
 test('длинная пачка новых сообщений не теряет последние', async () => {
@@ -227,4 +271,15 @@ test('в корне Kwork агент узнаёт, что ожидающих о�
   world.writeSync({ ok: true, at: new Date(now).toISOString() });
   const next = runBrief({ session_id: 'r1', cwd: world.kworkRoot, hook_event_name: 'UserPromptSubmit' }, options());
   assert.match(next, /ответа больше никто не ждёт/);
+});
+
+test('рабочая копия T3 сданного заказа сводится к его папке в «Выполненные»', async () => {
+  const { normalizeWorkspace, resolveContext } = await load();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-done-'));
+  const kworkRoot = path.join(home, 'Projects', 'Kwork');
+  fs.mkdirSync(path.join(kworkRoot, 'Выполненные', 'shop'), { recursive: true });
+  const cwd = path.join(home, '.t3', 'worktrees', 'shop', 'branch', 'src');
+  const normalized = normalizeWorkspace(cwd, kworkRoot, home);
+  assert.equal(normalized, path.join(kworkRoot, 'Выполненные', 'shop', 'src'));
+  assert.equal(resolveContext(normalized, kworkRoot).order, 'shop');
 });

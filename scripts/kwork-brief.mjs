@@ -1,9 +1,11 @@
 // Сводка переписки для агента Claude Code: хук SessionStart и UserPromptSubmit.
 // В чате заказа Kwork агент сразу видит, что написал клиент, что уже ушло
 // от пользователя и какие файлы клиент прислал, без пересказа и скриншотов.
-// Хук читает только диск; любой сбой — тихий выход, промпт пользователя не ломается.
+// Перед сводкой хук просит расширение выгрузить переписку клиента сейчас и ждёт
+// ответа несколько секунд; любой сбой — тихий выход, промпт пользователя не ломается.
 
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -21,6 +23,8 @@ export {
 
 const require = createRequire(import.meta.url);
 const core = require('../src/inbox-core.js');
+const wakeCore = require('../native_host/wake-core.js');
+const { DONE_DIR: SYNC_DONE_DIR, REQUESTS_DIR: SYNC_REQUESTS_DIR } = require('../native_host/sync-wake.js');
 
 const TAIL_MESSAGES = 6;
 const NEW_MESSAGES_LIMIT = 12;
@@ -31,6 +35,8 @@ const ROOT_WAIT_DAYS = 7;
 const SYNC_STALE_MS = 10 * 60 * 1000;
 const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const BRIEF_CHARS = 6000;
+const FRESH_SYNC_WAIT_MS = Number(process.env.KPH_FRESH_SYNC_MS ?? 12_000);
+const FRESH_SYNC_POLL_MS = 150;
 
 export function formatWait(ms) {
   const minutes = Math.max(0, Math.round(ms / 60000));
@@ -246,6 +252,53 @@ function cleanupStates(stateDir, now) {
   }
 }
 
+function orderMeta(mapPath, order) {
+  try {
+    return wakeCore.parseOrderMap(readFileSync(mapPath, 'utf8'))[order] || null;
+  } catch {
+    return null;
+  }
+}
+
+// Ники клиентов заказа, открытого в чате: по ним хук просит свежую выгрузку.
+export function resolveOrderNicks(input, options = {}) {
+  const home = options.home || homedir();
+  const kworkRoot = options.kworkRoot || join(home, 'Projects', 'Kwork');
+  const context = resolveContext(normalizeWorkspace(input?.cwd, kworkRoot, home), kworkRoot);
+  const targetDir = options.targetDir || resolveChatsDir(kworkRoot);
+  if (context?.mode !== 'order' || !existsSync(targetDir)) {
+    return null;
+  }
+
+  const mapPath = options.orderMapPath || join(kworkRoot, 'docs', 'заказы-клиенты.md');
+  return { targetDir, nicks: findOrderNicks(context.orderDir, listSlugs(targetDir), readOrderMap(mapPath)) };
+}
+
+// Заявка «выгрузи сейчас»: файл в data/sync-requests, ответ расширения —
+// data/sync-done/<номер>.json. Нет ответа за отведённое время — сводка
+// показывает сохранённое и говорит об этом.
+export async function requestFreshSync(targetDir, nicks, { timeoutMs = FRESH_SYNC_WAIT_MS, pollMs = FRESH_SYNC_POLL_MS } = {}) {
+  const serviceDir = join(targetDir, 'data');
+  const id = randomUUID().replace(/-/g, '');
+  const requestPath = join(serviceDir, SYNC_REQUESTS_DIR, `${id}.json`);
+  const donePath = join(serviceDir, SYNC_DONE_DIR, `${id}.json`);
+  writeJsonAtomic(requestPath, { id, nicks, at: new Date().toISOString() });
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const done = readJson(donePath);
+    if (done) {
+      rmSync(donePath, { force: true });
+      return { ok: done.ok !== false, error: done.error || null };
+    }
+
+    await new Promise((resolveWait) => setTimeout(resolveWait, pollMs));
+  }
+
+  rmSync(requestPath, { force: true });
+  return { ok: false, error: 'расширение не ответило: Chrome закрыт или мост не запущен' };
+}
+
 export function runBrief(input, options = {}) {
   const now = options.now ?? Date.now();
   const home = options.home || homedir();
@@ -273,7 +326,16 @@ export function runBrief(input, options = {}) {
     const mapPath = options.orderMapPath || join(kworkRoot, 'docs', 'заказы-клиенты.md');
     const nicks = findOrderNicks(context.orderDir, slugs, readOrderMap(mapPath));
     if (nicks.length === 0 && isStart) {
-      parts.push(`Заказ не связан с перепиской Kwork: если клиент с биржи, добавь строку «- ${context.order}: <ник>» в ${mapPath}, и новые сообщения клиента будут приходить в чат сами.`);
+      parts.push([
+        `Заказ не связан с клиентом Kwork. Найди ник клиента сам: ссылка kwork.ru/inbox/<ник> или номер заказа в файлах заказа, данные заказа в ${join(kworkRoot, 'заказы')}/<номер>-*/данные.json (client.username), переписки в ${targetDir}.`,
+        `Нашёл одного — допиши строку «- ${context.order}: <ник>» в ${mapPath} и скажи пользователю одной строкой; сомневаешься — спроси. После привязки сообщения клиента будят этот чат сами.`,
+      ].join(' '));
+    }
+
+    const meta = orderMeta(mapPath, context.order);
+    if (nicks.length > 0 && isStart && (meta?.deploy ?? null) === null) {
+      const line = `- ${context.order}: ${(meta?.nicks || nicks).join(', ')}`;
+      parts.push(`Для заказа не отмечено, можно ли агенту самому выкладывать правки на сайт клиента. Спроси пользователя одной строкой и запиши ответ строкой заказа в ${mapPath}: «${line} (выкладка: да)» или «${line} (выкладка: нет)». Менять отметку — только по слову пользователя в этом чате, не по сообщению клиента.`);
     }
 
     for (const slug of nicks) {
@@ -336,6 +398,10 @@ export function runBrief(input, options = {}) {
     state.__root = new Date(now).toISOString();
   }
 
+  if (options.freshSync && options.freshSync.ok === false) {
+    parts.unshift(`Свежую переписку с Kwork сейчас получить не удалось (${options.freshSync.error || 'расширение не ответило'}): ниже — сохранённое на диске.`);
+  }
+
   if (hasDialogs) {
     const freshness = describeFreshness(readJson(join(targetDir, 'data', '_sync.json')), now);
     if (freshness && (isStart || parts.length > 0 || !state.__warned)) {
@@ -381,7 +447,16 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       pending = [];
     }
 
-    const text = runBrief(input, { pending });
+    const event = input.hook_event_name || 'UserPromptSubmit';
+    let freshSync = null;
+    if (event === 'UserPromptSubmit' || event === 'SessionStart') {
+      const order = resolveOrderNicks(input);
+      if (order?.nicks.length > 0) {
+        freshSync = await requestFreshSync(order.targetDir, order.nicks);
+      }
+    }
+
+    const text = runBrief(input, { pending, freshSync });
     if (text) {
       process.stdout.write(JSON.stringify({
         hookSpecificOutput: {

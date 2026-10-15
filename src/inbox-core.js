@@ -1012,21 +1012,16 @@
       }));
   }
 
-  // Загрузка истории делает сообщения прочитанными у заказчика, а бот
-  // kwork-hunter шлёт уведомление о сообщении, не прочитанном 5 минут. Свежее
-  // непрочитанное поэтому ждёт 10 минут: уведомление уходит, а пользователь
-  // успевает открыть переписку сам.
-  const UNREAD_HOLD_MS = 10 * 60 * 1000;
-
-  function holdFreshUnread(items, now, holdMs = UNREAD_HOLD_MS) {
-    const ready = [];
-    const held = [];
+  // Запрошенные агентом диалоги идут первыми: подтверждение запроса ждёт
+  // только их, а не весь проход с файлами и откликами.
+  function splitForced(items, forcedKeys) {
+    const forced = [];
+    const rest = [];
     for (const item of items || []) {
-      const age = now - Date.parse(item.lastTime);
-      (item.unread > 0 && !(age >= holdMs) ? held : ready).push(item);
+      (forcedKeys?.has(String(item.key).toLowerCase()) ? forced : rest).push(item);
     }
 
-    return { ready, held };
+    return { forced, rest };
   }
 
   // Страница «Мои предложения» несёт отправленные отклики массивом offers
@@ -1244,7 +1239,7 @@
     mergeMessages,
     needsFullHistory,
     messageKey,
-    holdFreshUnread,
+    splitForced,
     savedMessageKeys,
     parseChatList,
     parseOffers,

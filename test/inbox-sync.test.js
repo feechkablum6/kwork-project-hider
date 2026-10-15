@@ -400,17 +400,11 @@ test('после потолка limit история, дочитанная ку�
   assert.equal(result.complete, true);
 });
 
-test('свежее непрочитанное не трогается, пока бот не успел прислать уведомление', () => {
-  const now = Date.parse('2026-10-14T10:00:00.000Z');
-  const items = [
-    { key: 'fresh', unread: 2, lastTime: '2026-10-14T09:55:00.000Z' },
-    { key: 'old', unread: 1, lastTime: '2026-10-14T09:40:00.000Z' },
-    { key: 'read', unread: 0, lastTime: '2026-10-14T09:59:00.000Z' },
-  ];
-
-  const { ready, held } = core.holdFreshUnread(items, now);
-  assert.deepEqual(ready.map((item) => item.key), ['old', 'read']);
-  assert.deepEqual(held.map((item) => item.key), ['fresh']);
+test('диалог, который читает агент, выгружается первым', () => {
+  const items = [{ key: 'Other' }, { key: 'Ivan' }, { key: 'read' }];
+  const { forced, rest } = core.splitForced(items, new Set(['ivan']));
+  assert.deepEqual(forced.map((item) => item.key), ['Ivan']);
+  assert.deepEqual(rest.map((item) => item.key), ['Other', 'read']);
 });
 
 test('отказ биржи — 429, 5xx и обрыв сети; ошибки разбора и 400 касаются одного диалога', () => {

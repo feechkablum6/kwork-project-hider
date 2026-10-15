@@ -84,7 +84,9 @@ function writeState(statePath, state) {
 /** Атомарная запись на сервере: временный файл с правами 600, затем переименование. */
 function pushOverSsh(target, body, spawnFn = spawn) {
   const tmp = `${target.path}.tmp`;
-  const remote = `umask 077 && cat > '${tmp}' && mv '${tmp}' '${target.path}'`;
+  // Папку на сервере создаёт только тот, кто кладёт в неё по файлу на пачку (outbox).
+  const prepare = target.ensureDir ? `mkdir -p '${path.posix.dirname(target.path)}' && ` : '';
+  const remote = `umask 077 && ${prepare}cat > '${tmp}' && mv '${tmp}' '${target.path}'`;
   return new Promise((resolve, reject) => {
     const child = spawnFn('/usr/bin/ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', target.sshHost, remote], {
       stdio: ['pipe', 'ignore', 'pipe'],
@@ -98,6 +100,12 @@ function pushOverSsh(target, body, spawnFn = spawn) {
       stderr = (stderr + chunk).slice(-400);
     });
     child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    // ssh может закрыться раньше, чем дочитал тело (нет сети, отказ входа):
+    // ошибка записи в его вход не должна ронять весь мост.
+    child.stdin.on('error', (err) => {
       clearTimeout(timer);
       reject(err);
     });

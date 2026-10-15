@@ -35,8 +35,12 @@
 - `src/feed-content.js` — DOM-адаптер автоподгрузки в isolated world.
 - `src/inbox-content.js` — сбор переписки в isolated world, скачивание вложений и передача в фоновый скрипт.
 - `src/session-sync.js` — передаёт куки входа kwork.ru мосту; `native_host/session-push.js` кладёт их по ssh на сервер робота kwork-hunter (сообщения заказчиков в Telegram). Значения кук не логировать и на маке не хранить, только отпечаток.
-- `src/background.js` — service worker, единственная точка связи с native messaging хостом; раз в 2 минуты сам дописывает новые сообщения, вложения и отклики (`kwork.ru/offers`) без открытой вкладки Kwork.
+- `src/background.js` — service worker, единственная точка связи с native messaging хостом; раз в минуту сам дописывает новые сообщения, вложения и отклики (`kwork.ru/offers`) без открытой вкладки Kwork.
 - `native_host/` — мост на Node.js: протокол native messaging и запись файлов переписок.
+- `native_host/sync-wake.js` — заявки хука «выгрузи сейчас» (`data/sync-requests` → push расширению → `data/sync-done/<id>.json`); слушает только мост постоянного порта (`subscribe`).
+- `native_host/waker.js`, `wake-core.js`, `t3-client.js` — будильщик агентов: последним писал клиент и это не разобрано (`data/wake-state.json`, отметки `data/wake-dirty`) → сообщение в последний чат заказа в T3 (ключ `t3 auth session issue` на пачку, WS `message.dispatch`), правила агента — `~/Projects/Kwork/docs/побудка.md`.
+- `native_host/outbox.js` — очередь Telegram `data/outbox` → по ssh в `/srv/apps/kwork-hunter/data/outbox`, шлёт робот kwork-hunter.
+- `scripts/kwork-wake-report.mjs` — Stop-хук (`~/.claude/scripts/kwork-wake-report.sh`): строка «Итог для Telegram:» разбуженного агента → outbox.
 - `scripts/install-bridge.mjs`, `scripts/kwork-chat.mjs` — установка моста и чтение переписок из терминала.
 - `scripts/kwork-shared.mjs` — общее для сводки и сверки: папка переписок, связь заказ ↔ ник, рабочие копии T3, формат времени.
 - `scripts/kwork-brief.mjs` — сводка переписки для агента Claude Code (хуки SessionStart/UserPromptSubmit через `~/.claude/scripts/kwork-chat-brief.sh`): новые сообщения клиента, кто ответил последним, пути к файлам. Связь заказа с клиентом — `~/Projects/Kwork/docs/заказы-клиенты.md`.
