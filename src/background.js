@@ -548,7 +548,7 @@ const SYNC_THROTTLE_PAUSE_MS = 10 * 60 * 1000;
 
 let syncRunning = false;
 // Заявки агентов, которые ждут прохода: ники и номера заявок для ответа мосту.
-const forcedNext = { ids: new Set(), keys: new Set() };
+const forcedNext = { ids: new Set(), keys: new Set(), froms: new Set() };
 // Ручная выгрузка идёт в странице Kwork и шлёт прогресс; пока он свежий,
 // автовыгрузка не запускает второй поток запросов к бирже.
 const MANUAL_CRAWL_QUIET_MS = 2 * 60 * 1000;
@@ -596,6 +596,7 @@ function takeForced() {
   const forced = { ids: [...forcedNext.ids], keys: new Set(forcedNext.keys) };
   forcedNext.ids.clear();
   forcedNext.keys.clear();
+  forcedNext.froms.clear();
   return forced;
 }
 
@@ -1038,7 +1039,7 @@ async function syncInbox() {
         // Канал сообщил о новом сообщении этого клиента уже после снимка списка: его unread
         // устарел, и обычная выгрузка отметила бы новое прочитанным. Диалог ждёт следующего
         // прохода, а он начнётся сразу после этого (forcedNext).
-        const freshEvent = () => forcedNext.keys.has(key);
+        const freshEvent = () => forcedNext.keys.has(key) || forcedNext.froms.has(String(item.userId));
         let done = false;
         let quiet = false;
         try {
@@ -1188,7 +1189,7 @@ async function syncInbox() {
     syncRunning = false;
     lastPassEndedAt = Date.now();
     // Пока шёл проход, агенты могли попросить ещё: следующий проход сразу.
-    if (forcedNext.ids.size > 0 || forcedNext.keys.size > 0 || pullRerun) {
+    if (forcedNext.ids.size > 0 || forcedNext.keys.size > 0 || forcedNext.froms.size > 0 || pullRerun) {
       pullRerun = false;
       setTimeout(syncInbox, 0);
     }
@@ -1197,16 +1198,20 @@ async function syncInbox() {
 
 // Событие пришло во время прохода — после него будет ещё один: проход мог
 // уже прочитать список диалогов без этого сообщения.
-function syncFromPull(data) {
+// Клиент отмечается сразу, без паузы: идущий проход по нему проверяет, что
+// снимок списка устарел, и не отмечает новое сообщение прочитанным.
+async function syncFromPull(data) {
   const from = data?.from ? String(data.from) : '';
-  clearTimeout(pullSyncTimer);
-  pullSyncTimer = setTimeout(async () => {
-    if (from) {
-      const userIds = (await storageGet('local', SYNC_USER_IDS_KEY)) || {};
-      const nick = Object.keys(userIds).find((key) => userIds[key] === from);
-      if (nick) forcedNext.keys.add(nick.toLowerCase());
-    }
+  if (from) {
+    // До первого await: идущий проход должен увидеть событие немедленно.
+    forcedNext.froms.add(from);
+    const userIds = (await storageGet('local', SYNC_USER_IDS_KEY)) || {};
+    const nick = Object.keys(userIds).find((key) => userIds[key] === from);
+    if (nick) forcedNext.keys.add(nick.toLowerCase());
+  }
 
+  clearTimeout(pullSyncTimer);
+  pullSyncTimer = setTimeout(() => {
     if (syncRunning) {
       pullRerun = true;
     } else {

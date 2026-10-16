@@ -1003,7 +1003,9 @@
   function parsePullFrame(raw) {
     try {
       const frame = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      const body = typeof frame?.text === 'string' ? JSON.parse(frame.text) : frame?.text;
+      // Kwork кодирует text как часть адреса (%7B%22event…), JSON внутри.
+      const text = typeof frame?.text === 'string' && frame.text.startsWith('%') ? decodeURIComponent(frame.text) : frame?.text;
+      const body = typeof text === 'string' ? JSON.parse(text) : text;
       return isPlainObject(body) && typeof body.event === 'string' ? { event: body.event, data: body.data ?? null } : null;
     } catch {
       return null;

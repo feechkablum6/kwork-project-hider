@@ -429,6 +429,10 @@ test('кадр живого канала: событие и данные, мус
   const frame = JSON.stringify({ id: 7, channel: 'cnl_x', text: JSON.stringify({ event: 'new_inbox', data: { from: 16961627 } }), tag: 1, time: 'x' });
   assert.deepEqual(core.parsePullFrame(frame), { event: 'new_inbox', data: { from: 16961627 } });
   assert.deepEqual(core.parsePullFrame(JSON.stringify({ text: { event: 'inbox_sent', data: {} } })), { event: 'inbox_sent', data: {} });
+  // Так приходит на самом деле: text закодирован как часть адреса.
+  const encoded = JSON.stringify({ id: 560, channel: 'cnl_x', text: encodeURIComponent(JSON.stringify({ event: 'new_inbox', data: { from: 3970516 } })) });
+  assert.deepEqual(core.parsePullFrame(encoded), { event: 'new_inbox', data: { from: 3970516 } });
+  assert.equal(core.parsePullFrame(JSON.stringify({ text: '%E0%A4%A' })), null);
   assert.equal(core.parsePullFrame('не json'), null);
   assert.equal(core.parsePullFrame(JSON.stringify({ text: 'тоже не json' })), null);
   assert.equal(core.isInboxPullEvent('new_inbox'), true);
