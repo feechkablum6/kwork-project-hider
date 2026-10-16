@@ -1,6 +1,6 @@
 {
   "name": "kwork-project-hider",
-  "version": "1.21.0",
+  "version": "1.22.0",
   "private": true,
   "description": "Локальное Chrome-расширение для скрытия проектов и выгрузки переписок Kwork",
   "scripts": {

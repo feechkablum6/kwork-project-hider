@@ -532,6 +532,8 @@ const ATTACHMENT_CHUNK_BYTES = 3 * 1024 * 1024;
 // Файлы «Сообщений» и чата заказа Kwork хранит в разных корзинах.
 const ATTACHMENT_FINAL_HOSTS = new Set([...FILE_HOSTS, 'kwork-conversation.storage.yandexcloud.net', 'kwork-track.storage.yandexcloud.net']);
 const SYNC_RETRY_KEY = 'inboxSyncRetries';
+// Последний MID, прочитанный тихо (getnewmessages): следующий тихий запрос берёт только новее.
+const SYNC_QUIET_MID_KEY = 'inboxSyncQuietMids';
 const SYNC_FILE_RETRY_KEY = 'inboxFileRetries';
 const SYNC_MAX_FILE_RETRIES = 5;
 const SYNC_MAX_BACKOFF_MINUTES = 60;
@@ -826,6 +828,49 @@ async function syncDialog(item, saved, fileRetries, { files: withFiles = true } 
   return { ok: true, complete, throttled, files };
 }
 
+// Диалог с непрочитанным: новые личные сообщения без отметки «прочитано» (см. isQuietRead).
+// Сообщений внутри заказа getnewmessages не отдаёт — их берёт обычный путь (processDialog).
+async function syncDialogQuiet(item, quietMids, fileRetries, { files: withFiles = true } = {}) {
+  const key = item.key.toLowerCase();
+  const payload = await postKworkForm('/api/inbox/getnewmessages', {
+    interlocutorId: item.userId,
+    lastMessageId: quietMids[key] || '0',
+  });
+  const parsed = core.parseNewMessages(payload, { dialogKey: item.key, clientId: item.userId });
+  if (!parsed) {
+    return { ok: false, throttled: false, files: { saved: 0, failed: 0 } };
+  }
+
+  if (parsed.messages.length > 0) {
+    const response = await request({
+      command: 'save-dialog',
+      dialog: {
+        key: item.key,
+        title: item.key,
+        url: `${KWORK_ORIGIN}/inbox/${item.key}`,
+        clientId: item.userId,
+        // Последнее время диалога сдвинулось, а сообщения заказа между ними не читались:
+        // полнота истории больше не подтверждена, обычный путь дочитает её целиком.
+        complete: false,
+        updatedAt: new Date().toISOString(),
+        messages: parsed.messages,
+      },
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || 'мост не сохранил переписку');
+    }
+  }
+
+  if (parsed.maxMid && Number(parsed.maxMid) > Number(quietMids[key] || 0)) {
+    quietMids[key] = parsed.maxMid;
+  }
+
+  const files = syncStopped || !withFiles || parsed.messages.length === 0
+    ? { saved: 0, failed: 0 }
+    : await syncAttachments(item.key, fileRetries);
+  return { ok: true, quiet: true, saved: parsed.messages.length > 0, clientUnread: parsed.clientUnread, files };
+}
+
 // Отправленные отклики видны только на бирже: страница «Мои предложения»
 // несёт их готовым списком. По нему агент сверяет, ушёл ли отклик и по какой цене.
 async function syncOffers() {
@@ -933,6 +978,7 @@ async function syncInbox() {
     const userIds = { ...(await storageGet('local', USER_IDS_KEY) || {}), ...syncUserIds };
 
     const seen = { ...(await storageGet('local', SYNC_SEEN_KEY) || {}) };
+    const quietMids = { ...(await storageGet('local', SYNC_QUIET_MID_KEY) || {}) };
     const retries = { ...(await storageGet('local', SYNC_RETRY_KEY) || {}) };
     const times = { ...(await storageGet('local', SYNC_TIMES_KEY) || {}) };
     const now = Date.now();
@@ -963,8 +1009,8 @@ async function syncInbox() {
       }
     }
 
-    // Сообщения читаются сразу: о новом сообщении клиента теперь сообщает
-    // будильщик агентов (мост → Telegram), а не проверка бота «не прочитано».
+    // Сообщения читаются сразу: о новом сообщении клиента сообщает будильщик
+    // агентов (мост → Telegram). Непрочитанное читается тихо, без отметки на Kwork.
     const held = [];
     const savedKeys = [];
     const failedKeys = [];
@@ -989,12 +1035,50 @@ async function syncInbox() {
         }
 
         const key = item.key.toLowerCase();
+        // Канал сообщил о новом сообщении этого клиента уже после снимка списка: его unread
+        // устарел, и обычная выгрузка отметила бы новое прочитанным. Диалог ждёт следующего
+        // прохода, а он начнётся сразу после этого (forcedNext).
+        const freshEvent = () => forcedNext.keys.has(key);
         let done = false;
+        let quiet = false;
         try {
-          const result = await syncDialog(item, index.dialogs?.[key] || null, fileRetries, { files: withFiles });
+          let result;
+          if (!core.isQuietRead(item)) {
+            if (freshEvent()) {
+              skippedKeys.push(item.key);
+              return;
+            }
+
+            result = await syncDialog(item, index.dialogs?.[key] || null, fileRetries, { files: withFiles });
+          } else {
+            result = await syncDialogQuiet(item, quietMids, fileRetries, { files: withFiles });
+            quiet = result.ok;
+            // Непрочитанное может быть в заказе: обычная выгрузка его прочитанным не отмечает
+            // (лог робота 16.10.2026: unread заказа держался после выгрузки), но отметила бы
+            // личное. Есть личное непрочитанное — заказ ждёт, пока вы прочитаете диалог.
+            if (result.ok && item.order) {
+              if (result.clientUnread || freshEvent()) {
+                // Личное, прочитанное тихо, уже на диске — агенту оно нужно сейчас.
+                if (result.saved) savedKeys.push(item.key);
+                files.saved += result.files.saved;
+                files.failed += result.files.failed;
+                held.push(item);
+                return;
+              }
+
+              const full = await syncDialog(item, index.dialogs?.[key] || null, fileRetries, { files: withFiles });
+              result = {
+                ...full,
+                saved: full.ok || result.saved,
+                files: { saved: full.files.saved + result.files.saved, failed: full.files.failed + result.files.failed },
+              };
+              quiet = false;
+            }
+          }
+
           files.saved += result.files.saved;
           files.failed += result.files.failed;
-          if (result.ok) {
+          if (result.ok && result.saved !== false) {
             savedKeys.push(item.key);
           }
 
@@ -1013,7 +1097,7 @@ async function syncInbox() {
         if (done) {
           // Диалог вне списка свежих не знает своего последнего сообщения:
           // отметку «просмотрено» ему ставит следующий проход по списку.
-          if (item.lastId) seen[key] = item.lastId;
+          if (item.lastId) seen[key] = quiet ? core.quietSeenMark(item.lastId) : item.lastId;
           delete retries[key];
         } else {
           retries[key] = { n: (retries[key]?.n || 0) + 1, at: now };
@@ -1025,7 +1109,7 @@ async function syncInbox() {
       // текст переписки, а файлы докачаются следом в этом же проходе.
       const { forced: first, rest } = core.splitForced(changed, forced.keys);
       await runWithConcurrency(first, SYNC_CONCURRENCY, (item) => processDialog(item, false));
-      await storageSet('local', { [SYNC_SEEN_KEY]: seen, [SYNC_RETRY_KEY]: retries });
+      await storageSet('local', { [SYNC_SEEN_KEY]: seen, [SYNC_RETRY_KEY]: retries, [SYNC_QUIET_MID_KEY]: quietMids });
       const forcedFailed = [
         ...first.filter((item) => failedKeys.includes(item.key) || skippedKeys.includes(item.key)).map((item) => item.key),
         ...unknownForced,
@@ -1041,7 +1125,7 @@ async function syncInbox() {
       }
 
       await runWithConcurrency(rest, SYNC_CONCURRENCY, (item) => processDialog(item, true));
-      await storageSet('local', { [SYNC_SEEN_KEY]: seen, [SYNC_RETRY_KEY]: retries });
+      await storageSet('local', { [SYNC_SEEN_KEY]: seen, [SYNC_RETRY_KEY]: retries, [SYNC_QUIET_MID_KEY]: quietMids });
     }
 
     // Запрошенного агентом в списке изменений не было: на диске уже свежее.

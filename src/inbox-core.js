@@ -1042,6 +1042,8 @@
         lastId: item.MID ? String(item.MID) : null,
         lastFromId: item.MSGFROM ? String(item.MSGFROM) : null,
         unread: Number(item.unread_count) || 0,
+        // Последнее в диалоге — сообщение внутри заказа (type 'track').
+        order: item.type === 'track',
       }));
   }
 
@@ -1095,8 +1097,60 @@
     const known = seen || {};
     return (chatList || []).filter((item) => {
       const saved = known[String(item.key).toLowerCase()];
+      if (isQuietRead(item) && saved === quietSeenMark(item.lastId)) {
+        return false;
+      }
+
       return !item.lastId || saved !== item.lastId;
     });
+  }
+
+  // /inbox_more_messages отмечает непрочитанное прочитанным, и клиент видит это раньше,
+  // чем вы открыли переписку. Диалог с непрочитанным читается через getnewmessages:
+  // так сайт Kwork сам берёт новые сообщения, а прочитанными их отмечает отдельный запрос.
+  function isQuietRead(item) {
+    return Number(item?.unread) > 0;
+  }
+
+  // Отметка «прочитано тихо» отличается от последнего сообщения: когда вы прочитаете
+  // диалог на Kwork, он дочитается обычным путём, вместе с сообщениями внутри заказа.
+  function quietSeenMark(lastId) {
+    return `unread:${lastId}`;
+  }
+
+  // В ответе getnewmessages у сообщений нет id, только MID. Он и становится номером:
+  // склейка по содержанию потом оставляет его и за копией из обычной выгрузки,
+  // поэтому будильщик агента не примет то же сообщение за новое.
+  function parseNewMessages(payload, context) {
+    const list = payload?.success ? payload?.data?.messagesData : null;
+    if (!Array.isArray(list)) {
+      return null;
+    }
+
+    const records = list
+      .filter((item) => isPlainObject(item) && Number.isSafeInteger(Number(item.MID)) && Number(item.MID) > 0)
+      .map((item) => ({ ...item, id: String(Number(item.MID)) }))
+      .sort((left, right) => Number(left.id) - Number(right.id));
+    // Курсор (следующий lastMessageId) не уходит за первое непрочитанное клиента:
+    // следующий запрос снова вернёт его с текущей отметкой, и пустой ответ не снимет
+    // защиту от обычной выгрузки, пока вы его не прочитали.
+    let maxMid = 0;
+    let clientUnread = false;
+    for (const item of records) {
+      if (context?.clientId && String(item.MSGFROM) === String(context.clientId) && Number(item.unread) > 0) {
+        clientUnread = true;
+        break;
+      }
+
+      maxMid = Number(item.id);
+    }
+
+    return {
+      maxMid: maxMid ? String(maxMid) : null,
+      // Личное непрочитанное от клиента: обычная выгрузка отметила бы его прочитанным.
+      clientUnread,
+      messages: filterDialogMessages(collectMessages(records), context),
+    };
   }
 
   // Первая страница приносит 50 последних сообщений. Если даже самое старое из
@@ -1280,6 +1334,9 @@
     parsePullFrame,
     parsePullSettings,
     selectChangedDialogs,
+    isQuietRead,
+    quietSeenMark,
+    parseNewMessages,
     normalizeMessage,
     normalizeTime,
     renderDialogMarkdown,

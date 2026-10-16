@@ -11,12 +11,12 @@ test('список диалогов читается из window.chatList стр
   const html = chatListPage([
     { username: 'Vikka93', USERID: 24601858, time: 1791953021, MID: 439000001, MSGFROM: '24601858', unread_count: 2, message: 'текст со скобкой ] и "кавычкой"' },
     { username: 'support', USERID: 1, time: 1791953000, MID: 5, MSGFROM: 1, unread_count: 0 },
-    { username: 'stroisnab2007', USERID: 16961627, time: 1791958003, MID: 439373327, MSGFROM: '900', unread_count: 0 },
+    { username: 'stroisnab2007', USERID: 16961627, time: 1791958003, MID: 439373327, MSGFROM: '900', unread_count: 0, type: 'track' },
   ]);
 
   assert.deepEqual(core.parseChatList(html), [
-    { key: 'Vikka93', userId: '24601858', lastTime: '2026-10-14T04:43:41.000Z', lastId: '439000001', lastFromId: '24601858', unread: 2 },
-    { key: 'stroisnab2007', userId: '16961627', lastTime: '2026-10-14T06:06:43.000Z', lastId: '439373327', lastFromId: '900', unread: 0 },
+    { key: 'Vikka93', userId: '24601858', lastTime: '2026-10-14T04:43:41.000Z', lastId: '439000001', lastFromId: '24601858', unread: 2, order: false },
+    { key: 'stroisnab2007', userId: '16961627', lastTime: '2026-10-14T06:06:43.000Z', lastId: '439373327', lastFromId: '900', unread: 0, order: true },
   ]);
 });
 
@@ -433,4 +433,77 @@ test('кадр живого канала: событие и данные, мус
   assert.equal(core.parsePullFrame(JSON.stringify({ text: 'тоже не json' })), null);
   assert.equal(core.isInboxPullEvent('new_inbox'), true);
   assert.equal(core.isInboxPullEvent('is_online'), false);
+});
+
+// Непрочитанное у клиента читается через /api/inbox/getnewmessages: так сайт Kwork
+// сам берёт новые сообщения, а прочитанными их отмечает отдельный запрос.
+test('диалог с непрочитанным читается тихо', () => {
+  assert.equal(core.isQuietRead({ key: 'a', unread: 2 }), true);
+  assert.equal(core.isQuietRead({ key: 'a', unread: 0 }), false);
+  assert.equal(core.isQuietRead({ key: 'a' }), false);
+});
+
+test('тихо прочитанный диалог не перечитывается, пока клиент не написал ещё или вы не прочитали', () => {
+  const seen = { vikka93: core.quietSeenMark('10') };
+  assert.deepEqual(core.selectChangedDialogs([{ key: 'Vikka93', lastId: '10', unread: 1 }], seen), []);
+  assert.deepEqual(core.selectChangedDialogs([{ key: 'Vikka93', lastId: '11', unread: 2 }], seen).map((item) => item.key), ['Vikka93']);
+  // Прочитали на Kwork — диалог дочитывается обычным путём: там и сообщения внутри заказа.
+  assert.deepEqual(core.selectChangedDialogs([{ key: 'Vikka93', lastId: '10', unread: 0 }], seen).map((item) => item.key), ['Vikka93']);
+});
+
+function newMessagesPayload() {
+  return {
+    success: true,
+    data: {
+      messagesData: [
+        { MID: 411553744, MSGTO: 900, MSGFROM: 16961627, message: '', time: 1792068860, type: 'offer_kwork_done', unread: 0, mto: 'AkashiDevelop', mfrom: 'stroisnab2007', files: [] },
+        { MID: 411561872, MSGTO: 900, MSGFROM: 16961627, message: 'Прайс во вложении', time: 1792080137, unread: 1, mto: 'AkashiDevelop', mfrom: 'stroisnab2007', inbox_message_id: 404401397,
+          files: { 403371432: { FID: 403371432, fname: 'Прайс.xlsx', size: 8599217, url: 'https://kwork.ru/files/uploaded/fc/3b/e3/7cc450d55f/price.xlsx', entity: { MID: 411561872, MSGFROM: 16961627, time: 1792080137, message: null } } } },
+        { MID: 411561900, MSGTO: 16961627, MSGFROM: 900, message: 'Принял', time: 1792080200, unread: 1, mto: 'stroisnab2007', mfrom: 'AkashiDevelop', files: [] },
+      ],
+    },
+  };
+}
+
+test('ответ getnewmessages: номер сообщения — MID, пустые служебные отброшены, вложения на месте', () => {
+  const parsed = core.parseNewMessages(newMessagesPayload(), { dialogKey: 'stroisnab2007', clientId: '16961627' });
+  // Курсор не уходит за первое непрочитанное клиента: следующий запрос снова его вернёт
+  // и снова покажет, прочитано ли оно, — иначе пустой ответ сняли бы защиту.
+  assert.equal(parsed.maxMid, '411553744');
+  // Непрочитанное от клиента есть — обычной выгрузкой этот диалог не трогать.
+  assert.equal(parsed.clientUnread, true);
+  assert.deepEqual(parsed.messages.map((message) => [message.id, message.authorId, message.text]), [
+    ['411561872', '16961627', 'Прайс во вложении'],
+    ['411561900', '900', 'Принял'],
+  ]);
+  assert.equal(parsed.messages[0].attachments[0].url, 'https://kwork.ru/files/uploaded/fc/3b/e3/7cc450d55f/price.xlsx');
+  assert.equal(core.parseNewMessages({ success: false }, { dialogKey: 'x' }), null);
+  assert.equal(core.parseNewMessages({ success: true, data: {} }, { dialogKey: 'x' }), null);
+});
+
+test('тихая копия и копия из обычной выгрузки склеиваются, номер тихой остаётся', () => {
+  const quiet = core.parseNewMessages(newMessagesPayload(), { dialogKey: 'stroisnab2007', clientId: '16961627' }).messages;
+  const full = core.collectMessages({ data: { messages: [
+    { id: 543639600, MID: 411561872, MSGFROM: 16961627, MSGTO: 900, mfrom: 'stroisnab2007', mto: 'AkashiDevelop', time: 1792080137, message: 'Прайс во вложении', source_type: 9 },
+    { id: 543639700, MID: 411561900, MSGFROM: 900, MSGTO: 16961627, mfrom: 'AkashiDevelop', mto: 'stroisnab2007', time: 1792080200, message: 'Принял', source_type: 9 },
+  ] } });
+  const merged = core.mergeMessages(quiet, full);
+  assert.deepEqual(merged.map((message) => message.id), ['411561872', '411561900']);
+  assert.equal(merged[0].attachments.length, 1);
+});
+
+test('непрочитанное считается только от клиента', () => {
+  const payload = newMessagesPayload();
+  payload.data.messagesData[1].unread = 0;
+  const parsed = core.parseNewMessages(payload, { dialogKey: 'stroisnab2007', clientId: '16961627' });
+  assert.equal(parsed.clientUnread, false);
+  assert.equal(parsed.maxMid, '411561900');
+});
+
+test('непрочитанное клиента первым в ответе — курсор не двигается', () => {
+  const payload = newMessagesPayload();
+  payload.data.messagesData.shift();
+  const parsed = core.parseNewMessages(payload, { dialogKey: 'stroisnab2007', clientId: '16961627' });
+  assert.equal(parsed.clientUnread, true);
+  assert.equal(parsed.maxMid, null);
 });
