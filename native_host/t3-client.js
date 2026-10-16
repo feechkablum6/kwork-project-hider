@@ -201,7 +201,14 @@ function threadCreateCommand({ seed, projectId, title, modelSelection }) {
 }
 
 module.exports = {
+  PROTOCOL_VERSION,
+  T3_BIN,
+  WS_TIMEOUT_MS,
+  getJson,
+  issueSession,
   messageCommand,
+  revokeSession,
+  serverOrigin,
   stableUuid,
   threadCreateCommand,
   withT3,

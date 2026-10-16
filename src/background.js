@@ -1200,14 +1200,17 @@ async function syncInbox() {
 // уже прочитать список диалогов без этого сообщения.
 // Клиент отмечается сразу, без паузы: идущий проход по нему проверяет, что
 // снимок списка устарел, и не отмечает новое сообщение прочитанным.
-async function syncFromPull(data) {
+async function syncFromPull(data, event) {
   const from = data?.from ? String(data.from) : '';
   if (from) {
     // До первого await: идущий проход должен увидеть событие немедленно.
     forcedNext.froms.add(from);
     const userIds = (await storageGet('local', SYNC_USER_IDS_KEY)) || {};
     const nick = Object.keys(userIds).find((key) => userIds[key] === from);
-    if (nick) forcedNext.keys.add(nick.toLowerCase());
+    if (nick) {
+      forcedNext.keys.add(nick.toLowerCase());
+      if (event === 'new_inbox') fastSave(nick, from).catch(() => undefined);
+    }
   }
 
   clearTimeout(pullSyncTimer);
@@ -1218,6 +1221,58 @@ async function syncFromPull(data) {
       syncInbox();
     }
   }, PULL_DEBOUNCE_MS);
+}
+
+// Сообщение клиента уходит агенту сразу, тем же запросом, что и у сайта Kwork:
+// он не отмечает прочитанным. Полный проход идёт следом как обычно — файлы,
+// заказ и курсор остаются за ним.
+const fastSaving = new Set();
+
+async function fastSave(nick, userId) {
+  const key = nick.toLowerCase();
+  if (fastSaving.has(key) || manualCrawlBusy()) {
+    return;
+  }
+
+  fastSaving.add(key);
+  try {
+    const pausedUntil = (await storageGet('local', SYNC_TIMES_KEY))?.pausedUntil || 0;
+    if (Date.now() < pausedUntil) {
+      return;
+    }
+
+    const quietMids = (await storageGet('local', SYNC_QUIET_MID_KEY)) || {};
+    let payload;
+    try {
+      payload = await postKworkForm('/api/inbox/getnewmessages', { interlocutorId: userId, lastMessageId: quietMids[key] || '0' });
+    } catch (error) {
+      // Идущий проход тоже останавливается и сам ставит паузу, иначе затёр бы её.
+      if (isKworkRefusal(error)) {
+        syncStopped = true;
+        await pauseSync();
+      }
+      return;
+    }
+
+    const parsed = core.parseNewMessages(payload, { dialogKey: nick, clientId: userId });
+    if (parsed?.messages.length > 0) {
+      await request({
+        command: 'save-dialog',
+        dialog: {
+          key: nick,
+          title: nick,
+          url: `${KWORK_ORIGIN}/inbox/${nick}`,
+          clientId: userId,
+          // Как у тихого чтения: сообщения заказа между ними не читались.
+          complete: false,
+          updatedAt: new Date().toISOString(),
+          messages: parsed.messages,
+        },
+      });
+    }
+  } finally {
+    fastSaving.delete(key);
+  }
 }
 
 function connectPull(url) {
@@ -1245,7 +1300,7 @@ function connectPull(url) {
   socket.onmessage = (event) => {
     const frame = core.parsePullFrame(event.data);
     if (frame && core.isInboxPullEvent(frame.event)) {
-      syncFromPull(frame.data);
+      syncFromPull(frame.data, frame.event);
     }
   };
   socket.onclose = () => {

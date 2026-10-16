@@ -10,6 +10,7 @@ const { handleSessionSync } = require('./session-push.js');
 const { createSyncWake } = require('./sync-wake.js');
 const { createWaker } = require('./waker.js');
 const t3Client = require('./t3-client.js');
+const { createT3Live } = require('./t3-live.js');
 
 const CONFIG_PATH = path.join(__dirname, 'bridge-config.json');
 const LOG_PATH = path.join(__dirname, 'bridge.log');
@@ -102,11 +103,14 @@ function startSyncWake() {
 
   const { targetDir } = readDirs();
   const config = readConfig();
+  const t3Live = createT3Live({ log });
+  t3Live.connect();
+  process.on('exit', () => t3Live.close());
   waker = createWaker({
     targetDir,
     kworkRoot: String(config.kworkRoot || '').trim() || path.dirname(targetDir),
     config,
-    t3: t3Client,
+    t3: { ...t3Client, withT3: t3Live.withT3 },
     log,
   });
   setInterval(runWaker, WAKER_TICK_MS).unref();
