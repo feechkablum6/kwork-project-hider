@@ -786,7 +786,8 @@ async function syncDialog(item, saved, fileRetries, { files: withFiles = true } 
   let strategy = null;
   let throttled = false;
 
-  if (core.needsFullHistory(saved, messages)) {
+  const fullNeeded = core.needsFullHistory(saved, messages);
+  if (fullNeeded) {
     const result = await core.loadDialogHistory({
       postForm: postKworkForm,
       pause,
@@ -815,6 +816,8 @@ async function syncDialog(item, saved, fileRetries, { files: withFiles = true } 
     clientId,
     strategy,
     complete,
+    // Первая страница сошлась с сохранённой историей — пропуска до её конца нет.
+    verified: !fullNeeded,
     updatedAt: new Date().toISOString(),
     messages,
   };
@@ -850,9 +853,9 @@ async function syncDialogQuiet(item, quietMids, fileRetries, { files: withFiles 
         title: item.key,
         url: `${KWORK_ORIGIN}/inbox/${item.key}`,
         clientId: item.userId,
-        // Последнее время диалога сдвинулось, а сообщения заказа между ними не читались:
-        // полнота истории больше не подтверждена, обычный путь дочитает её целиком.
-        complete: false,
+        // Сообщения заказа между ними не читались: без complete и verified мост не сдвигает
+        // точку сверки истории, и обычный путь первой страницей закроет пропуск, не перечитывая
+        // диалог целиком.
         updatedAt: new Date().toISOString(),
         messages: parsed.messages,
       },
@@ -1263,8 +1266,7 @@ async function fastSave(nick, userId) {
           title: nick,
           url: `${KWORK_ORIGIN}/inbox/${nick}`,
           clientId: userId,
-          // Как у тихого чтения: сообщения заказа между ними не читались.
-          complete: false,
+          // Как у тихого чтения: без complete и verified точка сверки не сдвигается.
           updatedAt: new Date().toISOString(),
           messages: parsed.messages,
         },

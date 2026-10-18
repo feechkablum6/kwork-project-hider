@@ -136,6 +136,16 @@ function saveDialog(targetDir, { dialog, sample }) {
     core.mergeMessages(previous?.messages, dialog?.messages),
     dialogContext,
   );
+  // Точка сверки — последнее сообщение, до которого история на диске сплошная. Двигает
+  // её только выгрузка, подтвердившая сплошность (verified или полная история), и только
+  // до конца своей пачки. Тихая запись (getnewmessages не видит сообщений заказа) и
+  // вкладка Kwork оставляют её на месте: пропуск дочитает обычная выгрузка.
+  const previousLast = Array.isArray(previous?.messages) ? previous.messages[previous.messages.length - 1] : null;
+  const previousVerified = previous?.verifiedTime ?? previousLast?.time ?? null;
+  const confirmed = dialog.verified === true || dialog.complete === true;
+  const verifiedTime = (confirmed ? [previousVerified, ...(dialog.messages || []).map((item) => item?.time)] : [previousVerified])
+    .filter((time) => Number.isFinite(Date.parse(time)))
+    .reduce((latest, time) => (latest && Date.parse(latest) >= Date.parse(time) ? latest : time), null);
   const record = {
     key: dialog.key,
     title: dialog.title || previous?.title || dialog.key,
@@ -143,6 +153,7 @@ function saveDialog(targetDir, { dialog, sample }) {
     clientId: dialog.clientId || previous?.clientId || null,
     historyStrategy: dialog.strategy || previous?.historyStrategy || null,
     historyComplete: dialog.complete === undefined ? previous?.historyComplete ?? null : dialog.complete,
+    verifiedTime,
     ownerId: dialog.ownerId || previous?.ownerId || null,
     updatedAt: dialog.updatedAt || new Date().toISOString(),
     messages,
@@ -354,7 +365,8 @@ function indexDialogs(targetDir, dialogKeys) {
     }
 
     dialogs[String(key).trim().toLowerCase()] = {
-      lastTime: last.time || null,
+      // Первая страница сверяется с точкой сверки, а не с последним тихим сообщением.
+      lastTime: record.verifiedTime || last.time || null,
       lastId: last.id ? String(last.id) : null,
       count: messages.length,
       complete: record.historyComplete ?? null,

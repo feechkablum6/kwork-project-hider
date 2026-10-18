@@ -437,6 +437,8 @@ test('кадр живого канала: событие и данные, мус
   assert.equal(core.parsePullFrame(JSON.stringify({ text: 'тоже не json' })), null);
   assert.equal(core.isInboxPullEvent('new_inbox'), true);
   assert.equal(core.isInboxPullEvent('is_online'), false);
+  // Сообщение внутри заказа приходит своим событием, без from (бандл order_*.js, 18.10.2026).
+  assert.equal(core.isInboxPullEvent('new_order_track'), true);
 });
 
 // Непрочитанное у клиента читается через /api/inbox/getnewmessages: так сайт Kwork

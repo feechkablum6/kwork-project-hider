@@ -983,7 +983,8 @@
   // Канал — ключ доступа к событиям: только в память, не в хранилище и не в лог.
   const PULL_HOST = /^(?:[a-z0-9-]+\.)*kwork\.ru$/;
   const PULL_CHANNEL = /^[A-Za-z0-9_-]{8,200}$/;
-  const PULL_INBOX_EVENTS = new Set(['new_inbox', 'inbox_sent']);
+  // Сообщение внутри заказа приходит не new_inbox, а new_order_track (только order_id).
+  const PULL_INBOX_EVENTS = new Set(['new_inbox', 'inbox_sent', 'new_order_track']);
 
   function parsePullSettings(markup) {
     const block = /pullModuleSettings\s*=\s*\{([^}]*)\}/.exec(String(markup || ''))?.[1] || '';
@@ -1008,7 +1009,7 @@
     }
   }
 
-  // Новое сообщение собеседника или своё отправленное — переписку пора выгрузить.
+  // Новое сообщение собеседника (личное или в заказе) или своё отправленное — переписку пора выгрузить.
   function isInboxPullEvent(event) {
     return PULL_INBOX_EVENTS.has(String(event || ''));
   }

@@ -290,6 +290,58 @@ test('мост отдаёт последнее сохранённое сообщ
   });
 });
 
+// Тихая запись (getnewmessages) не видит сообщений заказа между старым и новым:
+// полнота истории остаётся прежней, а сверка первой страницы идёт от последнего
+// сообщения до тихой записи — иначе длинный диалог перечитывался бы целиком.
+test('сверку истории двигает только подтверждённая выгрузка, не тихая запись и не вкладка', () => {
+  const targetDir = createTargetDir();
+  handleCommand(targetDir, {
+    command: 'save-dialog',
+    dialog: buildDialog([
+      { id: '1', time: '2026-07-26T08:00:00.000Z', authorName: 'ivan_petrov', text: 'Старое' },
+      { id: '2', time: '2026-07-26T09:00:00.000Z', authorName: 'ivan_petrov', text: 'Новое' },
+    ], { complete: true }),
+  });
+  handleCommand(targetDir, {
+    command: 'save-dialog',
+    dialog: buildDialog([
+      { id: '5', time: '2026-07-26T10:00:00.000Z', authorName: 'ivan_petrov', text: 'Тихое' },
+    ]),
+  });
+  handleCommand(targetDir, {
+    command: 'save-dialog',
+    dialog: buildDialog([
+      { id: '6', time: '2026-07-26T10:30:00.000Z', authorName: 'ivan_petrov', text: 'Ещё тихое' },
+    ]),
+  });
+
+  const quiet = handleCommand(targetDir, { command: 'dialog-index', dialogKeys: ['ivan_petrov'] });
+  assert.deepEqual(quiet.dialogs.ivan_petrov, { lastTime: '2026-07-26T09:00:00.000Z', lastId: '6', count: 4, complete: true });
+
+  // Вкладка Kwork сохранила последние сообщения без подтверждения, что пропуск закрыт:
+  // точка сверки стоит на месте, иначе сообщение заказа в пропуске потерялось бы.
+  handleCommand(targetDir, {
+    command: 'save-dialog',
+    dialog: buildDialog([
+      { id: '6', time: '2026-07-26T10:30:00.000Z', authorName: 'ivan_petrov', text: 'Ещё тихое' },
+    ]),
+  });
+  const tab = handleCommand(targetDir, { command: 'dialog-index', dialogKeys: ['ivan_petrov'] });
+  assert.equal(tab.dialogs.ivan_petrov.lastTime, '2026-07-26T09:00:00.000Z');
+
+  // Обычная выгрузка первой страницей закрыла пропуск — сверка до конца этой страницы.
+  handleCommand(targetDir, {
+    command: 'save-dialog',
+    dialog: buildDialog([
+      { id: '3', time: '2026-07-26T09:30:00.000Z', authorName: 'ivan_petrov', text: 'В заказе' },
+      { id: '6', time: '2026-07-26T10:30:00.000Z', authorName: 'ivan_petrov', text: 'Ещё тихое' },
+    ], { verified: true }),
+  });
+
+  const full = handleCommand(targetDir, { command: 'dialog-index', dialogKeys: ['ivan_petrov'] });
+  assert.deepEqual(full.dialogs.ivan_petrov, { lastTime: '2026-07-26T10:30:00.000Z', lastId: '6', count: 5, complete: true });
+});
+
 test('состояние автовыгрузки ложится служебным файлом', () => {
   const targetDir = createTargetDir();
   const result = handleCommand(targetDir, {
