@@ -10,6 +10,7 @@ const wakeCore = require('../native_host/wake-core.js');
 const { createWaker } = require('../native_host/waker.js');
 const { handleCommand } = require('../native_host/store.js');
 const { createFakeClaude } = require('./helpers/fake-claude.js');
+const reroute = require('../native_host/reroute.js');
 
 function message(id, minute, author, text) {
   return {
@@ -56,6 +57,10 @@ test('два действующих заказа — побудка идёт в 
   assert.deepEqual([two.dir, two.order.name, two.reason, two.orders.length], ['/k/Активные/shop', 'shop', 'ambiguous', 2]);
   // Никто ещё не работал — первый в списке.
   assert.equal(wakeCore.planRoute({ orders: [park, shop], kworkRoot: '/k', slug: 'ivan' }).order.name, 'park');
+  // Агент переслал побудку в другой заказ — туда, даже если там работали давно; чужая папка не в счёт.
+  const moved = wakeCore.planRoute({ orders: [park, shop], kworkRoot: '/k', slug: 'ivan', workedAt, preferred: park.dir });
+  assert.deepEqual([moved.order.name, moved.reason], ['park', 'rerouted']);
+  assert.equal(wakeCore.planRoute({ orders: [park, shop], kworkRoot: '/k', slug: 'ivan', workedAt, preferred: '/k/Активные/other' }).reason, 'ambiguous');
 });
 
 test('клиент без заказа — корень Kwork, у каждого клиента свой ключ маршрута', () => {
@@ -86,10 +91,11 @@ test('побудка при нескольких заказах: чужое со
   const text = wakeCore.buildWakeText({
     wakeId: 'abc', nick: 'ivan', record: record(messages), messages,
     route: { dir: shop.dir, key: shop.dir, order: shop, orders: [shop, park], reason: 'ambiguous' },
-    dialogDir: '/d', chatScript: '/s.mjs', rulesPath: '/r.md',
+    dialogDir: '/k/переписки/ivan', chatScript: '/s.mjs', rerouteScript: '/x/kwork-reroute.mjs', rulesPath: '/r.md',
   });
   assert.match(text, /У клиента есть и другие заказы: park \(\/k\/Активные\/park\)/);
-  assert.match(text, /не работай по нему здесь: одной строкой напиши пользователю, к какому заказу оно относится, и остановись/);
+  assert.match(text, /работали последним\. Если сообщение про другой заказ — не работай по нему здесь: перешли побудку туда командой `node \/x\/kwork-reroute\.mjs ivan abc <имя заказа>`/);
+  assert.match(text, /одной строкой напиши пользователю, к какому заказу оно относится, и остановись/);
   assert.doesNotMatch(text, /t3_|T3|settled/);
 });
 
@@ -777,6 +783,112 @@ test('при двух заказах побудка идёт в тот, где �
   }
 });
 
+// Клиент с двумя заказами, оба чата открыты в Desktop; в shop работали последним.
+async function worldWithTwoOrders() {
+  let clock = Date.parse('2026-10-14T10:00:00Z');
+  const world = createWorld({ now: () => clock });
+  const parkDir = path.join(world.kworkRoot, 'Активные', 'park');
+  fs.mkdirSync(parkDir);
+  fs.writeFileSync(path.join(world.kworkRoot, 'docs', 'заказы-клиенты.md'), '- shop: ivan\n- park: ivan\n');
+  world.claude.say(world.orderDir, 'shop-chat', clock - 1000);
+  world.claude.say(parkDir, 'park-chat', clock - 60 * 60 * 1000);
+  world.claude.addToDesktop('shop-chat', { cwd: world.orderDir });
+  world.claude.addToDesktop('park-chat', { cwd: parkDir });
+  const shopPid = world.claude.openDesktopChat(world.orderDir, 'shop-chat');
+  world.claude.openDesktopChat(parkDir, 'park-chat');
+  world.save([message(1, 0, 'me', 'жду')]);
+  await world.waker.tick();
+  const ask = (wakeId, order) => reroute.writeRequest(path.join(world.targetDir, 'data'), { slug: 'ivan', wakeId, order, at: clock });
+  return { world, shopPid, ask, advance: (ms) => { clock += ms; } };
+}
+
+const wakeNumber = (entry) => /#(\w+)\]/.exec(entry.user.message.content)[1];
+
+test('сообщение про другой заказ клиента: агент пересылает побудку — те же сообщения уходят в чат того заказа', async () => {
+  const { world, ask, advance } = await worldWithTwoOrders();
+  ask('abc', 'park');
+  await world.waker.tick();
+  assert.match(world.logs.at(-1), /пересылка в «park» отклонена — побудки #abc нет среди доставленных за сутки/);
+
+  advance(60 * 1000);
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'про парк')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(1);
+  const first = world.claude.inbox[0];
+  assert.equal(first.sessionId, 'shop-chat');
+  assert.match(first.user.message.content, new RegExp(`kwork-reroute\\.mjs ivan ${wakeNumber(first)} <имя заказа>`));
+  advance(2000);
+  await world.waker.tick();
+  assert.equal(world.stateOf().pending.ivan, undefined);
+
+  // Чужой заказ и заказ, где побудка уже, не принимаются; свой — те же сообщения в чат park, с новым номером.
+  ask(wakeNumber(first), 'nope');
+  await world.waker.tick();
+  assert.match(world.logs.at(-1), /пересылка в «nope» отклонена — у клиента нет такого заказа/);
+  ask(wakeNumber(first), 'shop');
+  await world.waker.tick();
+  assert.match(world.logs.at(-1), /пересылка в «shop» отклонена — побудка уже в этом заказе/);
+  ask(wakeNumber(first), 'park');
+  advance(2000);
+  await world.waker.tick();
+  await world.claude.waitInbox(2);
+  const moved = world.claude.inbox[1];
+  assert.equal(moved.sessionId, 'park-chat');
+  assert.match(moved.user.message.content, /про парк/);
+  assert.match(moved.user.message.content, /переслал агент другого заказа/);
+  // Дальше пересланную не пересылают — по кругу она не пойдёт.
+  assert.doesNotMatch(moved.user.message.content, /kwork-reroute/);
+  assert.notEqual(wakeNumber(moved), wakeNumber(first));
+  advance(2000);
+  await world.waker.tick();
+  assert.equal(world.stateOf().pending.ivan, undefined);
+  assert.deepEqual(world.stateOf().reroute, {});
+  assert.equal(world.stateOf().handled.ivan, '2');
+
+  // Повтор той же команды — не дубль.
+  ask(wakeNumber(first), 'park');
+  await world.waker.tick();
+  assert.match(world.logs.at(-1), /отклонена — побудки #\w+ нет среди доставленных/);
+  assert.equal(world.claude.inbox.length, 2);
+  world.claude.closeDesktopChats();
+});
+
+test('клиент дописал, пока агент думал над пересылкой, — в чужой заказ уходит и исходное сообщение, и новое', async () => {
+  const { world, shopPid, ask, advance } = await worldWithTwoOrders();
+  advance(60 * 1000);
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'про парк')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(1);
+  const first = world.claude.inbox[0];
+  advance(2000);
+  await world.waker.tick();
+
+  // Агент shop занят, следующая побудка ждёт в его очереди, а он тем временем пересылает первую.
+  world.claude.setStatus(shopPid, 'busy');
+  world.claude.desktopReceives = false;
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'про парк'), message(3, 7, 'client', 'и ещё')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(2);
+  ask(wakeNumber(first), 'park');
+  await wait(world, advance, 30 * 1000);
+  assert.equal(world.claude.inbox.length, 2);
+
+  // Ход кончился, очередь разобрана — вторая подтверждена, и тогда пересылка уходит целиком.
+  world.claude.setStatus(shopPid, 'idle');
+  world.claude.touch(world.orderDir, 'shop-chat', Date.parse('2026-10-14T10:02:00Z'), JSON.stringify({ type: 'user', message: { role: 'user', content: `[Kwork-побудка #${wakeNumber(world.claude.inbox[1])}]` } }) + '\n');
+  world.claude.desktopReceives = true;
+  advance(2000);
+  await world.waker.tick();
+  advance(2000);
+  await world.waker.tick();
+  await world.claude.waitInbox(3);
+  const moved = world.claude.inbox[2];
+  assert.equal(moved.sessionId, 'park-chat');
+  assert.match(moved.user.message.content, /про парк/);
+  assert.match(moved.user.message.content, /и ещё/);
+  world.claude.closeDesktopChats();
+});
+
 test('переписку дописали, пока будильщик разбирал отметки, — новое сообщение не теряется', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-wake-race-'));
   const kworkRoot = path.join(home, 'Kwork');
@@ -836,4 +948,28 @@ test('чат-диспетчер не найден в Desktop — побудка 
   assert.equal(world.stateOf().pending.ivan.attempts, 1);
   assert.ok(world.logs.some((line) => /чат-диспетчер не найден в Claude Desktop/.test(line)));
   assert.equal(world.runs.length, 1);
+});
+
+test('команда пересылки оставляет заявку будильщику; неверные аргументы или нет такого заказа — подсказка, заявки нет', async () => {
+  const { runReroute } = await import('../scripts/kwork-reroute.mjs');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-reroute-cli-'));
+  fs.mkdirSync(path.join(home, 'Projects', 'Kwork', 'Активные', 'park'), { recursive: true });
+  const chatsDir = path.join(home, 'chats');
+  const previous = process.env.KPH_CHATS_DIR;
+  process.env.KPH_CHATS_DIR = chatsDir;
+  try {
+    const ok = runReroute(['ivan', 'abc123', 'park'], { home, now: 5 });
+    assert.equal(ok.code, 0);
+    assert.match(ok.text, /в чат заказа park/);
+    assert.deepEqual(reroute.listRequests(path.join(chatsDir, 'data')).map((item) => [item.slug, item.wakeId, item.order, item.at]), [['ivan', 'abc123', 'park', 5]]);
+    for (const args of [['ivan', 'park'], ['ivan', 'abc123', '../park'], ['ivan', 'abc 1', 'park'], ['ivan', 'abc123', 'парк']]) {
+      assert.equal(runReroute(args, { home, now: 5 }).code, 2, args.join(' '));
+    }
+    assert.match(runReroute(['ivan', 'abc123', 'парк'], { home, now: 5 }).text, /Ничего не переслано/);
+    assert.equal(reroute.listRequests(path.join(chatsDir, 'data')).length, 1);
+  } finally {
+    if (previous === undefined) delete process.env.KPH_CHATS_DIR;
+    else process.env.KPH_CHATS_DIR = previous;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

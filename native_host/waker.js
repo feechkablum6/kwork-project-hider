@@ -16,6 +16,7 @@ const core = require('../src/inbox-core.js');
 const replyCore = require('../src/reply-core.js');
 const wakeCore = require('./wake-core.js');
 const snooze = require('./snooze.js');
+const reroute = require('./reroute.js');
 const { WAKE_DIRTY_DIR } = require('./store.js');
 
 const STATE_FILE = 'wake-state.json';
@@ -32,6 +33,9 @@ const ORDER_FILE_BYTES = 40 * 1024;
 const INBOX_LINK = /kwork\.ru\/(?:new_)?inbox\/([A-Za-z0-9_.-]{2,40})/gi;
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const RUNS_DIR = 'wake-runs';
+// Агент пересылает побудку в другой заказ клиента — только пока она свежая; помнятся последние доставки.
+const REROUTE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const DELIVERED_KEEP = 10;
 // Агент заказа ещё работает в своём `claude -p` — проверить снова через столько.
 const BUSY_RECHECK_MS = 5000;
 // Побудка ушла — метка в журнале чата ждётся столько: сокет пишет сразу, диспетчеру нужен ход
@@ -142,6 +146,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
   const rulesPath = path.join(kworkRoot, 'docs', 'побудка.md');
   const mapPath = path.join(kworkRoot, 'docs', 'заказы-клиенты.md');
   const chatScript = path.join(PROJECT_ROOT, 'scripts', 'kwork-chat.mjs');
+  const rerouteScript = path.join(PROJECT_ROOT, 'scripts', 'kwork-reroute.mjs');
   let owner = false;
   let running = false;
   let dispatcherCheckedAt = 0;
@@ -168,6 +173,11 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       snoozed: state.snoozed || {},
       // Последний увиденный процесс диспетчера и время последней ссылки resume на него.
       dispatcher: state.dispatcher || {},
+      // Доставленные побудки диалога с отметками до них: [{ wakeId, key, handled, events, at }] — для
+      // пересылки в другой заказ клиента.
+      delivered: state.delivered || {},
+      // Папка заказа, куда агент переслал побудку диалога; снимается, когда она дошла.
+      reroute: state.reroute || {},
     };
   }
 
@@ -275,11 +285,12 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
   // Побудка привязана к последнему сообщению: пришло новое — это новая побудка с новым
   // номером. Ушедшая и ещё не подтверждённая (sent) остаётся за ней: новая ждёт её метки,
   // чтобы агент не получил одни и те же сообщения дважды.
-  function trackPending(state, slug, news) {
+  // salt — у пересланной побудки те же сообщения, но номер другой: диспетчер не примет его за копию.
+  function trackPending(state, slug, news, salt = '') {
     const previous = state.pending[slug];
     if (previous?.key === news.key) return previous;
     state.pending[slug] = {
-      wakeId: shortId(`${slug}:${news.key}`),
+      wakeId: shortId(`${slug}:${news.key}${salt}`),
       key: news.key,
       lastId: news.lastId,
       attempts: 0,
@@ -290,10 +301,19 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
   }
 
   // Разобрано: метки сдвигаются на то, что агент получил (или что пропущено).
-  function settle(state, slug, news) {
+  // delivery — { wakeId, key: ключ маршрута }, когда побудка дошла до агента (не пропущена): её отметки до сдвига
+  // запоминаются, и агент может переслать её в другой заказ клиента.
+  function settle(state, slug, news, delivery = null) {
+    if (delivery) {
+      const delivered = (state.delivered[slug] || []).filter((entry) => now() - entry.at < REROUTE_WINDOW_MS);
+      delivered.push({ ...delivery, handled: state.handled[slug] ?? null, events: state.eventMarks[slug] ?? null, at: now() });
+      state.delivered[slug] = delivered.slice(-DELIVERED_KEEP);
+    }
+
     if (news.lastId) state.handled[slug] = news.lastId;
     state.eventMarks[slug] = news.marks;
     delete state.pending[slug];
+    delete state.reroute[slug];
   }
 
   // Отметки захватываются переносом в .claimed до чтения переписки: запись,
@@ -329,6 +349,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       if (!news) {
         // Нового нет — побудка по диалогу снята; старые события, увиденные впервые, запоминаются.
         delete state.pending[slug];
+        delete state.reroute[slug];
         if (record) state.eventMarks[slug] = wakeCore.currentEventMarks(record);
         continue;
       }
@@ -339,13 +360,14 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
     return claimed;
   }
 
-  function routeFor(slug) {
+  function routeFor(slug, state) {
     return wakeCore.planRoute({
       orders: ordersForNick(slug),
       kworkRoot,
       slug,
       // Где работали последним — по самому свежему журналу в папке заказа, чаты пользователя тоже в счёт.
       workedAt: (order) => runner.lastActivity(order.dir),
+      preferred: state.reroute[slug] || null,
     });
   }
 
@@ -476,7 +498,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
     if (file && runner.received(file.file, sent.from, `${wakeCore.WAKE_MARK} #${sent.wakeId}]`)) {
       delete item.sent;
       const released = release(state, sent.routeKey);
-      settle(state, slug, sent);
+      settle(state, slug, sent, { wakeId: sent.wakeId, key: sent.routeKey });
       // Пока шла доставка, клиент мог дописать: это следующая побудка.
       const news = findNews(state, slug, readRecord(slug));
       if (news) trackPending(state, slug, news);
@@ -509,7 +531,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       return;
     }
 
-    const route = routeFor(slug);
+    const route = routeFor(slug, state);
     const chat = state.chats[route.key];
     if (chat?.pid && !runner.isRunning(chat.pid, chat.sessionId)) endRun(chat);
     const nick = record.key || slug;
@@ -550,6 +572,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       route,
       dialogDir: path.join(targetDir, slug),
       chatScript,
+      rerouteScript,
       rulesPath,
     });
 
@@ -625,7 +648,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       imported: false,
     };
     const released = release(state, route.key);
-    settle(state, slug, news);
+    settle(state, slug, news, { wakeId: item.wakeId, key: route.key });
     // Сразу на диск: упади мост после запуска — второй запуск в тот же чат не пойдёт.
     writeAtomic(statePath, state);
     log(`побудка ${slug}: ${news.reason}, ${resume ? 'агент в своём чате (ещё не в Desktop)' : 'новый чат'}${route.reason ? ` (${route.reason})` : ''}${released}`);
@@ -639,6 +662,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       const news = findNews(state, slug, record);
       if (!news) {
         delete state.pending[slug];
+        delete state.reroute[slug];
         continue;
       }
 
@@ -670,7 +694,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
         continue;
       }
 
-      waiting ??= new Set(Object.keys(state.pending).map((slug) => routeFor(slug).key));
+      waiting ??= new Set(Object.keys(state.pending).map((slug) => routeFor(slug, state).key));
       if (waiting.has(key)) continue;
       front ??= runner.desktopInFront();
       if (front) continue;
@@ -693,6 +717,44 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
     for (const [key, mark] of Object.entries(state.snoozed)) {
       if (mark.until <= now()) delete state.snoozed[key];
     }
+  }
+
+  // Заявки агентов «побудка не про этот заказ»: отметки разобранного возвращаются на те, что были до
+  // названной побудки, и её сообщения и события (с более поздними) уходят в чат названного заказа
+  // клиента. Одна пересылка на побудку. Пока побудка диалога в пути, заявка ждёт: иначе её
+  // подтверждение сдвинуло бы отметки мимо пересылки.
+  // Возвращает файлы разобранных заявок: удалять их — после записи состояния, иначе падение моста
+  // между шагами потеряет пересылку.
+  function ingestReroute(state) {
+    const done = [];
+    for (const request of reroute.listRequests(serviceDir)) {
+      const { slug } = request;
+      if (state.pending[slug]?.sent) continue;
+      done.push(request.filePath);
+      const target = routeFor(slug, state).orders.find((order) => order.name === request.order);
+      const delivered = state.delivered[slug] || [];
+      const index = delivered.findIndex((entry) => entry.wakeId === request.wakeId && now() - entry.at < REROUTE_WINDOW_MS);
+      const entry = delivered[index];
+      const refused = !target ? 'у клиента нет такого заказа'
+        : !entry ? `побудки #${request.wakeId} нет среди доставленных за сутки`
+          : entry.key === target.dir ? 'побудка уже в этом заказе' : null;
+      if (refused) {
+        log(`побудка ${slug}: пересылка в «${request.order}» отклонена — ${refused}`);
+        continue;
+      }
+
+      if (entry.handled) state.handled[slug] = entry.handled;
+      else delete state.handled[slug];
+      if (entry.events) state.eventMarks[slug] = entry.events;
+      else delete state.eventMarks[slug];
+      state.delivered[slug] = delivered.slice(0, index);
+      state.reroute[slug] = target.dir;
+      const news = findNews(state, slug, readRecord(slug));
+      if (news) trackPending(state, slug, news, `:reroute:${request.wakeId}`);
+      log(`побудка ${slug}: агент переслал #${request.wakeId} в заказ ${target.name}`);
+    }
+
+    return done;
   }
 
   // Сбой — только запись в лог и повтор: первый сразу, дальше 1, 2, 4… минут.
@@ -742,7 +804,9 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       const dirty = collectDirty(state);
       onCollected();
       ingestSnooze(state);
+      const rerouted = ingestReroute(state);
       writeAtomic(statePath, state);
+      for (const file of rerouted) fs.rmSync(file, { force: true });
       // Захваченные отметки снимаются только после записи состояния: упади
       // мост раньше — диалог просто проверится ещё раз.
       for (const slug of dirty) fs.rmSync(path.join(claimedDir, slug), { force: true });
