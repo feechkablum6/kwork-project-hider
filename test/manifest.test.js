@@ -14,7 +14,7 @@ test('manifest использует MV3, хранилище, мост на ди�
   const manifest = readManifest();
 
   assert.equal(manifest.manifest_version, 3);
-  assert.deepEqual(manifest.permissions, ['storage', 'nativeMessaging', 'tabs', 'cookies', 'alarms']);
+  assert.deepEqual(manifest.permissions, ['storage', 'nativeMessaging', 'tabs', 'alarms']);
   assert.deepEqual(manifest.host_permissions, ['https://kwork.ru/*', 'https://cdn-edge.kwork.ru/*', 'https://kwork-conversation.storage.yandexcloud.net/*', 'https://kwork-track.storage.yandexcloud.net/*']);
   assert.equal(manifest.action.default_popup, 'src/popup.html');
   assert.equal(manifest.background.service_worker, 'src/background.js');
@@ -30,7 +30,7 @@ test('content scripts запускаются только на страница�
   assert.equal(mainWorldScript.exclude_matches, undefined);
   assert.deepEqual(
     mainWorldScript.js,
-    ['src/core.js', 'src/feed-main.js', 'src/inbox-core.js', 'src/inbox-main.js', 'src/inbox-crawler.js', 'src/ticks-main.js'],
+    ['src/core.js', 'src/feed-main.js', 'src/inbox-core.js', 'src/inbox-main.js', 'src/inbox-crawler.js', 'src/ticks-main.js', 'src/reply-main.js'],
   );
   assert.equal(mainWorldScript.world, 'MAIN');
   assert.equal(mainWorldScript.run_at, 'document_start');
@@ -44,6 +44,7 @@ test('content scripts запускаются только на страница�
       'src/project-core.js',
       'src/payout-core.js',
       'src/payout-source.js',
+      'src/reply-core.js',
       'src/content.js',
       'src/feed-content.js',
       'src/inbox-content.js',
@@ -51,6 +52,7 @@ test('content scripts запускаются только на страница�
       'src/payout-content.js',
       'src/report-toggle.js',
       'src/ticks-content.js',
+      'src/reply-content.js',
     ],
   );
   assert.deepEqual(contentScript.css, ['src/content.css']);

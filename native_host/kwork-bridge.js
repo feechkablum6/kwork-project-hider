@@ -6,18 +6,14 @@ const path = require('node:path');
 
 const { encodeFrame, decodeFrames } = require('./frames.js');
 const { handleCommand } = require('./store.js');
-const { handleSessionSync } = require('./session-push.js');
 const { createSyncWake } = require('./sync-wake.js');
 const { createWaker } = require('./waker.js');
-const t3Client = require('./t3-client.js');
-const { createT3Live } = require('./t3-live.js');
+const { createClaudeRunner } = require('./claude-runner.js');
 
 const CONFIG_PATH = path.join(__dirname, 'bridge-config.json');
 const LOG_PATH = path.join(__dirname, 'bridge.log');
 
 let buffer = Buffer.alloc(0);
-let pending = 0;
-let inputClosed = false;
 let syncWake = null;
 let waker = null;
 
@@ -53,32 +49,9 @@ function readConfig() {
   }
 }
 
-function exitWhenIdle() {
-  if (inputClosed && pending === 0) process.exit(0);
-}
-
-// Передача входа в Kwork на сервер робота идёт по ssh и занимает секунды, поэтому отдельно
-// от синхронных команд записи на диск; процесс не завершается, пока она не закончилась.
-function processSessionSync(message) {
-  const id = message?.id ?? null;
-  pending += 1;
-  handleSessionSync(message, { config: readConfig() })
-    .then(
-      (result) => respond({ ok: true, id, command: 'syncSession', ...result }),
-      (error) => {
-        const reason = error?.message || String(error);
-        log(`вход на сервер не передан: ${reason}`);
-        respond({ ok: false, id, command: 'syncSession', error: reason });
-      },
-    )
-    .finally(() => {
-      pending -= 1;
-      exitWhenIdle();
-    });
-}
 
 // Заявки агентов слушает только мост постоянного порта фонового скрипта: он
-// присылает subscribe. Одноразовый мост (передача входа) заявки не трогает,
+// присылает subscribe. Одноразовый мост (разовая команда расширения) заявки не трогает,
 // иначе забрал бы их и ответил мимо расширения.
 const WAKE_TICK_MS = 1000;
 
@@ -103,14 +76,10 @@ function startSyncWake() {
 
   const { targetDir } = readDirs();
   const config = readConfig();
-  const t3Live = createT3Live({ log });
-  t3Live.connect();
-  process.on('exit', () => t3Live.close());
   waker = createWaker({
     targetDir,
     kworkRoot: String(config.kworkRoot || '').trim() || path.dirname(targetDir),
-    config,
-    t3: { ...t3Client, withT3: t3Live.withT3 },
+    runner: createClaudeRunner({ log }),
     log,
   });
   setInterval(runWaker, WAKER_TICK_MS).unref();
@@ -124,11 +93,6 @@ function runWaker() {
 
 function processMessage(message) {
   const id = message?.id ?? null;
-  if (message?.command === 'syncSession') {
-    processSessionSync(message);
-    return;
-  }
-
   if (message?.command === 'subscribe') {
     try {
       startSyncWake();
@@ -153,8 +117,8 @@ function processMessage(message) {
   try {
     const result = handleCommand(readDirs(), message);
     respond({ ok: true, id, command: message?.command || null, ...result });
-    // Новая переписка — будильщик смотрит её сразу, не дожидаясь своего такта.
-    if (message?.command === 'save-dialog') {
+    // Новая переписка или событие заказа — будильщик смотрит сразу, не дожидаясь своего такта.
+    if (message?.command === 'save-dialog' || (message?.command === 'save-order-events' && result?.saved)) {
       runWaker();
     }
   } catch (error) {
@@ -173,10 +137,7 @@ process.stdin.on('data', (chunk) => {
   }
 });
 
-process.stdin.on('end', () => {
-  inputClosed = true;
-  exitWhenIdle();
-});
+process.stdin.on('end', () => process.exit(0));
 process.on('uncaughtException', (error) => {
   log(`сбой: ${error?.stack || error}`);
   process.exit(1);

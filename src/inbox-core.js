@@ -320,7 +320,109 @@
       authorId: authorId === null ? null : String(authorId),
       authorName: authorName === null ? null : String(authorName).trim(),
       text,
+      // «Цитировать» (isQuote) берёт выделенный кусок, «Ответить» — сообщение целиком.
+      kind: quote.isQuote === true ? 'quote' : 'reply',
     };
+  }
+
+  // Служебные сообщения переписки (предложение, «Заказ создан») приходят без текста, но
+  // с типом. Заголовок — из словаря, а не из typeTitle: getnewmessages его не присылает,
+  // и копии одного сообщения из двух выгрузок иначе не склеились бы по тексту.
+  const INBOX_EVENT_TITLES = {
+    offer_kwork_new: 'Предложение индивидуального кворка',
+    offer_kwork_done: 'Заказ создан',
+    custom_request_new: 'Предложение индивидуального заказа',
+    custom_request_wait_payment: 'Заказ ожидает пополнения баланса покупателем',
+  };
+  // Отказ на образцах ещё не встречался: статусы ниже — по названиям Kwork в других местах,
+  // любой другой показывается как есть.
+  const OFFER_STATUS_TEXT = {
+    new: 'ждёт оплаты клиентом',
+    done: 'клиент принял, заказ создан',
+    cancel: 'отменено или отклонено',
+    canceled: 'отменено или отклонено',
+    cancelled: 'отменено или отклонено',
+    reject: 'клиент отказался',
+    rejected: 'клиент отказался',
+    decline: 'клиент отказался',
+    declined: 'клиент отказался',
+  };
+
+  function positiveNumber(value) {
+    const number = Number(String(value ?? '').replace(/\s/g, ''));
+    return Number.isFinite(number) && number > 0 ? number : null;
+  }
+
+  function durationDays(seconds) {
+    const value = positiveNumber(seconds);
+    return value ? Math.max(1, Math.round(value / 86400)) : null;
+  }
+
+  function normalizeInboxEvent(raw) {
+    const type = typeof raw?.type === 'string' ? raw.type.trim() : '';
+    const title = INBOX_EVENT_TITLES[type] || (type && typeof raw.typeTitle === 'string' ? raw.typeTitle.trim() : '');
+    if (!title) {
+      return null;
+    }
+
+    const event = { type, title };
+    const offer = isPlainObject(raw.offerOrderData) ? raw.offerOrderData : null;
+    const order = isPlainObject(offer?.orderData) ? offer.orderData : null;
+    if (type === 'offer_kwork_new' && order) {
+      event.name = htmlToText(order.kwork_title) || null;
+      event.price = positiveNumber(order.price);
+      event.days = positiveNumber(order.kwork_days) || durationDays(order.duration);
+      event.status = typeof offer.status === 'string' && offer.status ? offer.status : null;
+      if (offer.doneOrderId) event.orderId = String(offer.doneOrderId);
+    } else if (type === 'custom_request_new' && isPlainObject(raw.data)) {
+      event.price = positiveNumber(raw.data.budget);
+      event.days = durationDays(raw.data.duration);
+      // Числовой статус запроса клиента; что значат его значения, Kwork не пишет —
+      // сохраняется как есть, смену статуса агент видит.
+      if (raw.data.status !== undefined && raw.data.status !== null && raw.data.status !== '') event.status = String(raw.data.status);
+    } else if (type === 'custom_request_wait_payment' && order) {
+      event.price = positiveNumber(order.price);
+    } else if (type === 'offer_kwork_done' && raw.created_order_id) {
+      event.orderId = String(raw.created_order_id);
+    }
+
+    return event;
+  }
+
+  function formatRubles(value) {
+    return `${Number(value).toLocaleString('ru-RU')} ₽`;
+  }
+
+  function formatDays(value) {
+    const number = Number(value);
+    const mod10 = number % 10;
+    const mod100 = number % 100;
+    const word = mod10 === 1 && mod100 !== 11 ? 'день' : mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14) ? 'дня' : 'дней';
+    return `${number} ${word}`;
+  }
+
+  // Строка события для переписки, сводки агента и побудки: что произошло и с какими деньгами.
+  function describeInboxEvent(event) {
+    if (!isPlainObject(event)) {
+      return '';
+    }
+
+    const terms = [
+      event.name ? `«${event.name}»` : null,
+      event.price ? formatRubles(event.price) : null,
+      event.days ? formatDays(event.days) : null,
+    ].filter(Boolean).join(', ');
+    if (event.type === 'offer_kwork_new') {
+      const status = event.status ? OFFER_STATUS_TEXT[event.status] || `статус ${event.status}` : null;
+      return [`${event.title}${terms ? `: ${terms}` : ''}`, status].filter(Boolean).join(' — ');
+    }
+
+    if (event.type === 'offer_kwork_done') {
+      return `${event.title}${event.orderId ? ` №${event.orderId}` : ''} — клиент принял и оплатил предложение`;
+    }
+
+    const status = event.status ? ` — статус Kwork ${event.status}` : '';
+    return `${event.title}${terms ? `: ${terms}` : ''}${status}`;
   }
 
   function normalizeMessage(raw) {
@@ -328,7 +430,8 @@
       return null;
     }
 
-    const text = htmlToText(firstFilledKey(raw, TEXT_KEYS));
+    const event = normalizeInboxEvent(raw);
+    const text = htmlToText(firstFilledKey(raw, TEXT_KEYS)) || event?.title || '';
     const attachments = collectAttachments(raw);
     if (!text && attachments.length === 0) {
       return null;
@@ -340,6 +443,7 @@
     const recipientName = firstFilledKey(raw, RECIPIENT_NAME_KEYS);
     const id = firstFilledKey(raw, ID_KEYS);
     const time = normalizeTime(firstFilledKey(raw, TIME_KEYS));
+    const orderId = firstFilledKey(raw, ['order_id', 'orderId']);
 
     return {
       id: id === null ? null : String(id),
@@ -351,7 +455,221 @@
       text,
       attachments,
       replyTo: normalizeQuote(raw),
+      // Поля без значения не пишутся: при склейке копия без них не затирает полную.
+      ...(orderId !== null ? { orderId: String(orderId) } : {}),
+      ...(event ? { event } : {}),
     };
+  }
+
+  // События заказа (страница /track): опции, оплата, сдача, отмена. Обычные сообщения
+  // заказа (тип 24) уже есть в переписке, здесь только то, чего в ней нет.
+  // Заголовки — как их видит продавец (tracksDesc Kwork, вариант worker).
+  const TRACK_TITLES = {
+    8: 'Покупатель создал заказ',
+    11: 'Заказ принят автоматически',
+    12: 'Заказ отменён автоматически',
+    16: 'Покупатель принял работу',
+    17: 'Покупатель вернул заказ на доработку',
+    18: 'Покупатель отменил заказ',
+    19: 'Заказ отменён по согласованию сторон',
+    20: 'Покупатель передумал отменять заказ',
+    21: 'Покупатель отказался отменять заказ',
+    22: 'Покупатель предложил отменить заказ',
+    23: 'Покупатель создал заказ',
+    25: 'Покупатель предоставил нужные данные',
+    27: 'Вы отменили заказ',
+    28: 'Заказ отменён по согласованию сторон',
+    29: 'Вы передумали отменять заказ',
+    30: 'Вы не согласились на отмену заказа',
+    31: 'Вы предложили отменить заказ',
+    32: 'Вы сдали заказ на проверку',
+    33: 'Вы приступили к работе',
+    35: 'Покупатель принял работу',
+    42: 'Покупка доп. опций отменена',
+    46: 'Покупатель повысил уровень кворка',
+    48: 'Вы отправили промежуточный отчёт',
+    49: 'Покупатель отправил бонус',
+    53: 'Покупатель принял работу по задачам',
+    54: 'Покупатель принял работу по задачам',
+    57: 'Ожидается оплата задачи',
+    62: 'Оплата задачи зарезервирована',
+    63: 'Оплата задачи зарезервирована',
+    65: 'Оплата задачи зарезервирована',
+    68: 'Оплата задачи зарезервирована',
+  };
+  const TRACK_DISPUTE_TYPES = new Set([1, 2, 3, 4, 6, 15, 26, 37, 38, 39, 59, 60, 61]);
+  const TRACK_AUTO_CANCEL_TYPES = new Set([5, 7, 9, 10, 34, 47, 58, 64]);
+  // Тихие события: побудка агенту без пользы (своё начало работы, чек самозанятого).
+  const TRACK_SILENT_TYPES = new Set([24, 33, 82]);
+  const OPTION_TRACK_TYPE = 13;
+  const OPTION_STATUS_TEXT = {
+    new: 'Ждёт оплаты клиентом',
+    done: 'Клиент оплатил',
+    close: 'Клиент отказался',
+    cancel: 'Вы отменили предложение',
+  };
+
+  function trackTitle(track) {
+    const fromHtml = /<h3[^>]*>([\s\S]*?)<\/h3>/i.exec(String(track?.html || ''))?.[1];
+    const title = fromHtml ? htmlToText(fromHtml) : (typeof track?.title === 'string' ? htmlToText(track.title) : '');
+    const type = Number(track?.type);
+    if (title) return title;
+    if (TRACK_TITLES[type]) return TRACK_TITLES[type];
+    if (TRACK_DISPUTE_TYPES.has(type)) return 'Спор по заказу';
+    if (TRACK_AUTO_CANCEL_TYPES.has(type)) return 'Заказ отменён';
+    return `Событие заказа (тип ${type})`;
+  }
+
+  // Статус предложения опций — в заголовке: один и тот же трек Kwork меняет его
+  // с «Вы предложили опции» на «К заказу добавлены…», «…отказался…» или «…отменили…».
+  function optionStatus(title) {
+    const text = String(title || '').toLowerCase();
+    if (/добавлен|оплатил/.test(text)) return 'done';
+    if (/отказал/.test(text)) return 'close';
+    if (/отмен/.test(text)) return 'cancel';
+    if (/предлож/.test(text)) return 'new';
+    return null;
+  }
+
+  // Таблица опций трека: «Опция | Кол-во | Срок | Стоимость».
+  function parseTrackOptions(html) {
+    const options = [];
+    // Заголовок таблицы Kwork набирает теми же <td> внутри <thead>: строки берутся из <tbody>.
+    const table = /<table[^>]*track-extra-table[\s\S]*?<\/table>/i.exec(String(html || ''))?.[0] || '';
+    const body = (table.replace(/<thead[\s\S]*?<\/thead>/gi, ''));
+    for (const row of body.match(/<tr[\s\S]*?<\/tr>/gi) || []) {
+      const rawCells = row.match(/<td[\s\S]*?<\/td>/gi) || [];
+      const cells = rawCells.map((cell) => htmlToText(cell).replace(/\s+/g, ' ').trim());
+      if (cells.length < 4 || !cells[0]) {
+        continue;
+      }
+
+      const exact = /data-price="([\d.]+)"/.exec(rawCells[rawCells.length - 1])?.[1];
+      options.push({
+        name: cells[0],
+        count: positiveNumber(cells[1]) || 1,
+        days: Number.parseInt(cells[2], 10) || 0,
+        price: positiveNumber(exact) || positiveNumber(cells[cells.length - 1].replace(/[^\d.,]/g, '').replace(',', '.')),
+      });
+    }
+
+    return options;
+  }
+
+  function trackActor(type, title, status) {
+    if (type === OPTION_TRACK_TYPE) {
+      return status === 'new' || status === 'cancel' ? 'me' : status ? 'client' : 'system';
+    }
+
+    if (/^вы\s/i.test(title)) return 'me';
+    if (/покупател|клиент/i.test(title)) return 'client';
+    return 'system';
+  }
+
+  function describeOptions(options) {
+    return (options || [])
+      .map((option) => [
+        `«${option.name}»`,
+        // В треке Kwork показывает продавцу доход — сумму без комиссии.
+        option.price ? `вам ${formatRubles(option.price)}` : null,
+        option.days ? `+${formatDays(option.days)}` : null,
+      ].filter(Boolean).join(', '))
+      .join('; ');
+  }
+
+  function normalizeTrackEvent(track, orderId) {
+    const type = Number(track?.type);
+    if (!isPlainObject(track) || !track.id || !Number.isFinite(type) || type === 24) {
+      return null;
+    }
+
+    const title = trackTitle(track);
+    const status = type === OPTION_TRACK_TYPE ? optionStatus(title) : null;
+    const options = type === OPTION_TRACK_TYPE ? parseTrackOptions(track.html) : [];
+    const actor = trackActor(type, title, status);
+    const comment = htmlToText(track.message || '');
+    return {
+      id: `track:${track.id}`,
+      orderId: String(orderId),
+      time: normalizeTime(track.time),
+      type,
+      title,
+      actor,
+      ...(status ? { status } : {}),
+      ...(options.length ? { options } : {}),
+      ...(comment ? { comment } : {}),
+      // Агенту — всё, кроме тихих.
+      wake: !TRACK_SILENT_TYPES.has(type),
+    };
+  }
+
+  function parseTrackEvents(tracks, orderId) {
+    return (Array.isArray(tracks) ? tracks : [])
+      .map((track) => normalizeTrackEvent(track, orderId))
+      .filter(Boolean)
+      .sort((left, right) => Date.parse(left.time || 0) - Date.parse(right.time || 0));
+  }
+
+  // Событие заказа одной строкой: заголовок Kwork, опции с деньгами и статус.
+  function describeTrackEvent(event) {
+    if (!isPlainObject(event)) {
+      return '';
+    }
+
+    const head = `Заказ №${event.orderId}: ${event.title}`;
+    const options = event.options?.length ? describeOptions(event.options) : '';
+    const status = event.type === OPTION_TRACK_TYPE && event.status ? OPTION_STATUS_TEXT[event.status] : '';
+    return [head + (options ? ` — ${options}` : ''), status].filter(Boolean).join('. ');
+  }
+
+  // Список «Заказы» продавца (/get_manage_orders): вкладки и заказы текущей вкладки.
+  // Живые вкладки — всё, кроме выполненных, отменённых и общей «Все».
+  const FINAL_ORDER_TABS = new Set(['completed', 'cancelled', 'all']);
+
+  function parseManageOrders(payload) {
+    const data = isPlainObject(payload?.data) ? payload.data : null;
+    if (!data) {
+      return null;
+    }
+
+    const tabs = Object.entries(isPlainObject(data.ordersItems) ? data.ordersItems : {})
+      .filter(([key, tab]) => !FINAL_ORDER_TABS.has(key) && Number(tab?.count) > 0)
+      .map(([key]) => key);
+    const orders = (Array.isArray(data.orderListData) ? data.orderListData : [])
+      .map((order) => {
+        const login = String(order?.user?.login || '').trim()
+          || String(order?.user?.url || '').split('/user/')[1]?.replace(/\/.*$/, '') || '';
+        const orderId = /^\d+$/.test(String(order?.id ?? '')) ? String(order.id) : null;
+        return orderId && login ? { orderId, key: login, clientId: order.user?.id ? String(order.user.id) : null, status: String(order.status || '') } : null;
+      })
+      .filter(Boolean);
+    return { tab: typeof data.s === 'string' ? data.s : null, tabs, orders };
+  }
+
+  // Заказ клиента по трекам: собеседник — автор трека «создал заказ» или любого
+  // своего трека, а не продавец (продавец пишет «Вы …»).
+  function findTrackClient(tracks) {
+    for (const track of Array.isArray(tracks) ? tracks : []) {
+      const type = Number(track?.type);
+      if ((type === 23 || type === 8) && track.author?.username) {
+        return { key: String(track.author.username), clientId: track.author.id ? String(track.author.id) : null };
+      }
+    }
+
+    return null;
+  }
+
+  // События с диска и свежие: свежая копия того же трека заменяет старую (статус опций
+  // меняется на том же треке), порядок — по времени.
+  function mergeEvents(previous, fresh) {
+    const byId = new Map();
+    for (const event of [...(Array.isArray(previous) ? previous : []), ...(Array.isArray(fresh) ? fresh : [])]) {
+      if (isPlainObject(event) && event.id) {
+        byId.set(String(event.id), event);
+      }
+    }
+
+    return [...byId.values()].sort((left, right) => Date.parse(left.time || 0) - Date.parse(right.time || 0));
   }
 
   // stats.records — сколько записей сообщений было в ответе до отсева пустых
@@ -1263,14 +1581,39 @@
       '',
     );
 
-    for (const message of messages) {
+    // События заказа (опции, оплата, сдача) встают между сообщениями по времени.
+    const timeline = [
+      ...messages.map((message) => ({ message, at: Date.parse(message.time) || 0 })),
+      ...(Array.isArray(dialog?.events) ? dialog.events : []).map((event) => ({ event, at: Date.parse(event.time) || 0 })),
+    ].sort((left, right) => left.at - right.at);
+
+    for (const { message, event } of timeline) {
+      if (event) {
+        lines.push(`## Событие заказа — ${formatMessageTime(event.time)}`);
+        lines.push('');
+        lines.push(describeTrackEvent(event));
+        if (event.comment) {
+          lines.push('');
+          lines.push(event.comment.replace(/^(\s*)(#+)/gm, '$1\\$2'));
+        }
+        lines.push('');
+        continue;
+      }
+
       lines.push(`## ${resolveAuthorLabel(message, dialog)} — ${formatMessageTime(message.time)}`);
       lines.push('');
+      if (message.event) {
+        lines.push(`[${describeInboxEvent(message.event)}]`);
+        lines.push('');
+      }
+
       if (message.replyTo) {
         // Подпись цитаты повторяет заголовок исходной реплики слово в слово,
         // поэтому и человек, и агент находят её простым совпадением строки.
+        // «Цитировать» берёт кусок сообщения — подпись говорит, что это не всё сообщение.
         const quotedLabel = resolveAuthorLabel(message.replyTo, dialog);
-        lines.push(`> В ответ на сообщение «${quotedLabel} — ${formatMessageTime(message.replyTo.time)}»:`);
+        const lead = message.replyTo.kind === 'quote' ? 'Цитата из сообщения' : 'В ответ на сообщение';
+        lines.push(`> ${lead} «${quotedLabel} — ${formatMessageTime(message.replyTo.time)}»:`);
         if (message.replyTo.text) {
           for (const quotedLine of String(message.replyTo.text).split('\n')) {
             lines.push(`> ${quotedLine.replace(/^(\s*)(#+)/, '$1\\$2')}`.trimEnd());
@@ -1279,7 +1622,7 @@
         lines.push('');
       }
 
-      if (message.text) {
+      if (message.text && message.text !== message.event?.title) {
         // Решётка в начале строки сообщения превратилась бы в заголовок и сбила
         // границы реплик, поэтому она экранируется.
         lines.push(message.text.replace(/^(\s*)(#+)/gm, '$1\\$2'));
@@ -1310,6 +1653,13 @@
     buildHistoryRequest,
     collectMessages,
     countNewMessages,
+    describeInboxEvent,
+    describeTrackEvent,
+    findTrackClient,
+    formatRubles,
+    mergeEvents,
+    parseManageOrders,
+    parseTrackEvents,
     getOldestMessage,
     extractDialogKey,
     extractProfileUserId,

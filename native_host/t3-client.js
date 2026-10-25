@@ -183,6 +183,15 @@ function messageCommand({ seed, threadId, text }) {
   };
 }
 
+// Откладывает будильщик по заявке агента, возвращает — побудка (snooze.js).
+function snoozeCommand({ seed, threadId, snoozedUntil }) {
+  return { type: 'thread.snooze', commandId: stableUuid(`${seed}:snooze-command`), threadId, snoozedUntil };
+}
+
+function unsnoozeCommand({ seed, threadId }) {
+  return { type: 'thread.unsnooze', commandId: stableUuid(`${seed}:unsnooze-command`), threadId, reason: 'user' };
+}
+
 function threadCreateCommand({ seed, projectId, title, modelSelection }) {
   return {
     type: 'thread.create',
@@ -209,7 +218,9 @@ module.exports = {
   messageCommand,
   revokeSession,
   serverOrigin,
+  snoozeCommand,
   stableUuid,
   threadCreateCommand,
+  unsnoozeCommand,
   withT3,
 };

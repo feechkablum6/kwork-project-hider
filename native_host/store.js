@@ -157,6 +157,8 @@ function saveDialog(targetDir, { dialog, sample }) {
     ownerId: dialog.ownerId || previous?.ownerId || null,
     updatedAt: dialog.updatedAt || new Date().toISOString(),
     messages,
+    // События заказов (опции, оплата, сдача) пишет отдельная команда; переписка их не трогает.
+    events: Array.isArray(previous?.events) ? previous.events : [],
     samples: sample ? [...(previous?.samples || []), sample].slice(-3) : (previous?.samples || []),
   };
 
@@ -165,6 +167,8 @@ function saveDialog(targetDir, { dialog, sample }) {
   // Вторая отметка — после записи: будильщик, захвативший первую и прочитавший
   // переписку до записи, увидит новое сообщение по второй на следующем такте.
   markDialogDirty(targetDir, slug);
+  updateOrderIndex(targetDir, slug, record);
+  updateOpenOffers(targetDir, slug, record);
 
   return {
     path: markdownPath,
@@ -393,6 +397,213 @@ function saveOffers(targetDir, offers) {
   return { path: filePath, offers: list.length };
 }
 
+// Заказы клиентов: номер заказа → диалог. По нему расширение знает, чьи события
+// заказов читать и куда их писать. Закрытый заказ (принят, отменён) читается ещё сутки.
+const ORDER_INDEX_FILE = 'orders.json';
+const ORDER_CLOSED_TYPES = new Set([5, 7, 9, 10, 11, 12, 16, 18, 19, 27, 28, 34, 35, 47, 58, 60, 61, 64]);
+
+function readOrderIndex(targetDir) {
+  const index = readJson(path.join(getServiceDir(targetDir), ORDER_INDEX_FILE));
+  return index && typeof index === 'object' && !Array.isArray(index) ? index : null;
+}
+
+function collectOrders(slug, record) {
+  const orders = {};
+  const touch = (orderId, time, closed = false) => {
+    const id = String(orderId || '').trim();
+    if (!/^\d+$/.test(id)) return;
+    const entry = orders[id] || { dialogKey: record.key || slug, slug, clientId: record.clientId || null, lastTime: null, closed: false };
+    if (time && (!entry.lastTime || Date.parse(time) > Date.parse(entry.lastTime))) entry.lastTime = time;
+    entry.closed = entry.closed || closed;
+    orders[id] = entry;
+  };
+
+  for (const message of Array.isArray(record.messages) ? record.messages : []) {
+    touch(message.orderId, message.time);
+    touch(message.event?.orderId, message.time);
+  }
+
+  for (const event of Array.isArray(record.events) ? record.events : []) {
+    touch(event.orderId, event.time, ORDER_CLOSED_TYPES.has(Number(event.type)));
+  }
+
+  return orders;
+}
+
+function updateOrderIndex(targetDir, slug, record) {
+  const indexPath = path.join(getServiceDir(targetDir), ORDER_INDEX_FILE);
+  const index = readOrderIndex(targetDir) || buildOrderIndex(targetDir);
+  let changed = false;
+  for (const [orderId, entry] of Object.entries(collectOrders(slug, record))) {
+    if (JSON.stringify(index[orderId]) !== JSON.stringify(entry)) {
+      index[orderId] = entry;
+      changed = true;
+    }
+  }
+
+  if (changed || !fs.existsSync(indexPath)) {
+    writeFileAtomic(indexPath, `${JSON.stringify(index, null, 2)}\n`);
+  }
+}
+
+function buildOrderIndex(targetDir) {
+  const index = {};
+  for (const entry of fs.existsSync(targetDir) ? fs.readdirSync(targetDir, { withFileTypes: true }) : []) {
+    if (!entry.isDirectory() || entry.name === DATA_DIR_NAME || entry.name.startsWith('.')) continue;
+    const record = readJson(path.join(targetDir, entry.name, core.DIALOG_DATA_NAME));
+    if (record) Object.assign(index, collectOrders(entry.name, record));
+  }
+
+  return index;
+}
+
+// Индивидуальные предложения, которые клиент ещё не оплатил: отказ Kwork не
+// присылает новым сообщением, а меняет статус у старого — расширение перечитывает
+// такие диалоги. Предложение старше двух недель уже не ждём.
+const OPEN_OFFERS_FILE = 'open-offers.json';
+const OPEN_OFFER_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+// Записи до 1.24.0 хранили предложение без события, одним заголовком Kwork: их статус
+// неизвестен, и первая перепроверка его узнаёт.
+const LEGACY_OFFER_TITLE = 'Предложение индивидуального кворка';
+
+function collectOpenOffers(slug, record) {
+  const clientId = record.clientId ? String(record.clientId) : null;
+  const offers = (Array.isArray(record.messages) ? record.messages : [])
+    .filter((message) => (message.event?.type === 'offer_kwork_new' && message.event.status === 'new')
+      || (!message.event && message.text === LEGACY_OFFER_TITLE && (!clientId || String(message.authorId) !== clientId)))
+    .map((message) => ({ id: message.id ? String(message.id) : null, time: message.time || null }));
+  return offers.length > 0 ? { dialogKey: record.key || slug, clientId: record.clientId || null, offers } : null;
+}
+
+function readOpenOffers(targetDir) {
+  const index = readJson(path.join(getServiceDir(targetDir), OPEN_OFFERS_FILE));
+  if (index && typeof index === 'object' && !Array.isArray(index)) return index;
+  const built = {};
+  for (const entry of fs.existsSync(targetDir) ? fs.readdirSync(targetDir, { withFileTypes: true }) : []) {
+    if (!entry.isDirectory() || entry.name === DATA_DIR_NAME || entry.name.startsWith('.')) continue;
+    const record = readJson(path.join(targetDir, entry.name, core.DIALOG_DATA_NAME));
+    const open = record && collectOpenOffers(entry.name, record);
+    if (open) built[entry.name] = open;
+  }
+
+  return built;
+}
+
+function updateOpenOffers(targetDir, slug, record) {
+  const filePath = path.join(getServiceDir(targetDir), OPEN_OFFERS_FILE);
+  const existed = fs.existsSync(filePath);
+  const index = readOpenOffers(targetDir);
+  const open = collectOpenOffers(slug, record);
+  if (!existed || JSON.stringify(index[slug] || null) !== JSON.stringify(open)) {
+    if (open) index[slug] = open;
+    else delete index[slug];
+    writeFileAtomic(filePath, `${JSON.stringify(index, null, 2)}\n`);
+  }
+}
+
+function listOpenOffers(targetDir, now = Date.now()) {
+  const fresh = (offer) => now - (Date.parse(offer?.time) || 0) < OPEN_OFFER_MAX_AGE_MS;
+  return {
+    dialogs: Object.entries(readOpenOffers(targetDir))
+      .map(([slug, entry]) => ({ slug, dialogKey: entry.dialogKey, clientId: entry.clientId, ids: (entry.offers || []).filter(fresh).map((offer) => offer.id || offer.time) }))
+      .filter((entry) => entry.ids.length > 0),
+  };
+}
+
+// Заказы, события которых стоит читать: живые за 45 дней и закрытые за последние сутки.
+function listActiveOrders(targetDir, now = Date.now()) {
+  const index = readOrderIndex(targetDir) || buildOrderIndex(targetDir);
+  const orders = Object.entries(index)
+    .map(([orderId, entry]) => ({ orderId, ...entry }))
+    .filter((entry) => {
+      const age = now - (Date.parse(entry.lastTime) || 0);
+      return entry.closed ? age < 24 * 60 * 60 * 1000 : age < 45 * 24 * 60 * 60 * 1000;
+    })
+    .sort((left, right) => (Date.parse(right.lastTime) || 0) - (Date.parse(left.lastTime) || 0));
+  return { orders };
+}
+
+// События заказа ложатся в данные диалога клиента. Запись и отметка будильщику —
+// только когда что-то изменилось: опрос заказов идёт каждые пару минут.
+function saveOrderEvents(targetDir, { dialogKey, clientId, orderId, events }) {
+  const slug = core.buildDialogSlug(dialogKey);
+  if (!slug || core.isServiceDialogKey(dialogKey) || !/^\d+$/.test(String(orderId || ''))) {
+    throw new Error('события заказа без диалога или номера заказа');
+  }
+
+  const fresh = (Array.isArray(events) ? events : []).filter((event) => event && String(event.orderId) === String(orderId));
+  ensureDir(targetDir);
+  migrateDialogLayout(targetDir, slug);
+  const dialogDir = ensureDir(getDialogDir(targetDir, slug));
+  const jsonPath = path.join(dialogDir, core.DIALOG_DATA_NAME);
+  const previous = readJson(jsonPath);
+  const merged = core.mergeEvents(previous?.events, fresh);
+  if (previous && JSON.stringify(merged) === JSON.stringify(previous.events || [])) {
+    return { saved: false, events: merged.length };
+  }
+
+  markDialogDirty(targetDir, slug);
+  const record = {
+    key: previous?.key || dialogKey,
+    title: previous?.title || dialogKey,
+    url: previous?.url || `https://kwork.ru/inbox/${dialogKey}`,
+    clientId: previous?.clientId || clientId || null,
+    historyStrategy: previous?.historyStrategy ?? null,
+    historyComplete: previous?.historyComplete ?? null,
+    verifiedTime: previous?.verifiedTime ?? null,
+    ownerId: previous?.ownerId ?? null,
+    updatedAt: new Date().toISOString(),
+    messages: Array.isArray(previous?.messages) ? previous.messages : [],
+    events: merged,
+    samples: previous?.samples || [],
+  };
+  writeFileAtomic(jsonPath, `${JSON.stringify(record, null, 2)}\n`);
+  writeFileAtomic(path.join(dialogDir, core.DIALOG_MARKDOWN_NAME), core.renderDialogMarkdown(record));
+  markDialogDirty(targetDir, slug);
+  updateOrderIndex(targetDir, slug, record);
+  return { saved: true, events: merged.length };
+}
+
+// Черновик агента для панели на странице Kwork: части ответа, а рядом — хвост
+// переписки и события заказа, по которым панель видит, что уже отправлено и не
+// устарел ли черновик. Только в память страницы: на диск расширение это не пишет.
+const DRAFTS_DIR = 'drafts';
+const DRAFT_MESSAGE_FIELDS = ['id', 'time', 'authorId', 'authorName', 'text', 'orderId', 'event', 'replyTo'];
+
+function getDraft(targetDir, { dialogKey, orderId } = {}) {
+  let slug = dialogKey ? core.buildDialogSlug(dialogKey) : null;
+  if (!slug && /^\d+$/.test(String(orderId || ''))) {
+    slug = (readOrderIndex(targetDir) || buildOrderIndex(targetDir))[String(orderId)]?.slug || null;
+  }
+
+  if (!slug) {
+    return { draft: null };
+  }
+
+  const draft = readJson(path.join(getServiceDir(targetDir), DRAFTS_DIR, `${slug}.json`));
+  if (!draft || !Array.isArray(draft.parts) || draft.parts.length === 0) {
+    return { slug, draft: null };
+  }
+
+  const record = readJson(path.join(targetDir, slug, core.DIALOG_DATA_NAME));
+  const messages = (Array.isArray(record?.messages) ? record.messages : []).slice(-80).map((message) => {
+    const item = {};
+    for (const field of DRAFT_MESSAGE_FIELDS) {
+      if (message[field] !== undefined) item[field] = message[field];
+    }
+    return item;
+  });
+  return {
+    slug,
+    dialogKey: record?.key || draft.nick || slug,
+    clientId: record?.clientId || draft.clientId || null,
+    draft,
+    messages,
+    events: (Array.isArray(record?.events) ? record.events : []).slice(-40),
+  };
+}
+
 // По этому файлу агент понимает, насколько свежи переписки на диске.
 function saveSyncStatus(targetDir, status) {
   const filePath = path.join(getServiceDir(targetDir), '_sync.json');
@@ -555,6 +766,22 @@ function handleCommand(dirs, message) {
     return saveKnownDialogs(targetDir, message.dialogKeys);
   }
 
+  if (message?.command === 'save-order-events') {
+    return saveOrderEvents(targetDir, message);
+  }
+
+  if (message?.command === 'active-orders') {
+    return listActiveOrders(targetDir);
+  }
+
+  if (message?.command === 'open-offers') {
+    return listOpenOffers(targetDir, Number(message.now) || Date.now());
+  }
+
+  if (message?.command === 'get-draft') {
+    return getDraft(targetDir, message);
+  }
+
   throw new Error(`неизвестная команда: ${message?.command}`);
 }
 
@@ -568,6 +795,9 @@ module.exports = {
   saveDialog,
   saveDiagnostics,
   saveKnownDialogs,
+  saveOrderEvents,
+  listActiveOrders,
+  getDraft,
   saveProject,
   saveProjectFile,
 };

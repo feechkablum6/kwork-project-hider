@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -21,6 +21,7 @@ import {
 
 const require = createRequire(import.meta.url);
 const core = require('../src/inbox-core.js');
+const reply = require('../src/reply-core.js');
 
 // Агенты называют черновик по-разному: «Сообщение клиенту:», «Текст клиенту:»,
 // «Черновик клиенту, отправлять после выкладки:», «Предлагаю ответить клиенту так:».
@@ -746,8 +747,15 @@ export function capture(input, options = {}) {
     return [];
   }
 
-  const turn = readLastTurn(readFileSync(input.transcript_path, 'utf8').split('\n'));
+  const transcriptText = readFileSync(input.transcript_path, 'utf8');
+  const turn = readLastTurn(transcriptText.split('\n'));
   const { order, nicks } = context;
+  try {
+    capturePanelDraft({ turn, nicks, transcriptText, sessionId: input.session_id, order, paths });
+  } catch {
+    // Панель — подсказка: без черновика она просто не появится.
+  }
+
   const drafts = buildPendingDrafts({ turn, sessionId: input.session_id, cwd: input.cwd, order, nicks });
   if (drafts.length === 0) {
     return [];
@@ -776,6 +784,90 @@ export function capture(input, options = {}) {
   }
 
   return written;
+}
+
+// ---------- черновик для панели на Kwork ----------
+
+const WAKE_NICK = /\[Kwork-побудка #[0-9a-f]{6,20}\] (?:Клиент ([^\s:]+)(?::| написал)|Вы написали клиенту (\S+) на Kwork)/g;
+const PANEL_DRAFTS_DIR = 'drafts';
+
+// Чей это черновик: единственный клиент заказа, иначе — ник из последней побудки
+// в этом чате (корневой чат Kwork разбирает разных клиентов).
+function draftNick(nicks, transcriptText, targetDir) {
+  if (nicks.length === 1) {
+    return nicks[0];
+  }
+
+  let found = null;
+  for (const match of String(transcriptText || '').matchAll(WAKE_NICK)) {
+    const slug = core.buildDialogSlug(match[1] || match[2]);
+    if (slug && (nicks.length === 0 || nicks.includes(slug)) && existsSync(join(targetDir, slug))) {
+      found = slug;
+    }
+  }
+
+  return found;
+}
+
+// Панель на странице переписки берёт части последнего ответа агента: на что
+// «Ответить», что «Цитировать», что выставить. Новый черновик заменяет прежний.
+export function capturePanelDraft({ turn, nicks, transcriptText, sessionId, order = null, paths }) {
+  let source = null;
+  for (let index = turn.replies.length - 1; index >= 0 && !source; index -= 1) {
+    const parts = reply.parseDraftParts(turn.replies[index].text, { markImplicit: true });
+    if (parts.length > 0) {
+      source = { reply: turn.replies[index], parts };
+    }
+  }
+
+  if (!source) {
+    return null;
+  }
+
+  const slug = draftNick(nicks, transcriptText, paths.targetDir);
+  if (!slug) {
+    return null;
+  }
+
+  const record = readJson(join(paths.targetDir, slug, core.DIALOG_DATA_NAME)) || {};
+  const messages = Array.isArray(record.messages) ? record.messages : [];
+  const clientId = record.clientId ? String(record.clientId) : null;
+  const lastClient = [...messages].reverse().find((message) => (clientId
+    ? String(message.authorId) === clientId
+    : String(message.authorName || '').toLowerCase() === String(record.key || slug).toLowerCase()));
+  const draft = {
+    id: createHash('sha1').update(`${source.reply.uuid || source.reply.at}:panel`).digest('hex').slice(0, 12),
+    at: source.reply.at || new Date().toISOString(),
+    session: sessionId || null,
+    order: order || null,
+    nick: record.key || slug,
+    slug,
+    clientId,
+    basedOn: lastClient?.time || null,
+    orderId: lastClient?.orderId || null,
+  };
+
+  const dir = join(paths.targetDir, 'data', PANEL_DRAFTS_DIR);
+  const file = join(dir, `${slug}.json`);
+  const previous = readJson(file);
+  if (previous?.id === draft.id) {
+    return null;
+  }
+
+  // Правка того же ответа в том же чате (клиент с тех пор не писал): части без
+  // заголовка сохраняют «Ответить»/«Цитировать» неотправленной части прошлого
+  // черновика. Черновик чата другого заказа того же клиента — не прошлый вариант.
+  const sameQuestion = previous?.slug === slug && (previous.basedOn || null) === draft.basedOn
+    && Boolean(draft.session) && previous.session === draft.session;
+  const sent = sameQuestion
+    ? reply.draftProgress(previous, messages, { clientId, dialogKey: record.key || slug, events: record.events || [] }).done
+    : [];
+  draft.parts = reply.inheritTargets(source.parts, sameQuestion ? previous : null, sent);
+
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(`${file}.tmp`, JSON.stringify(draft, null, 2));
+  renameSync(`${file}.tmp`, file);
+  return draft;
 }
 
 function loadPending(pendingDir) {

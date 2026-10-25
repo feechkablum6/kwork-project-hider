@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash",
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "mcp__ccd_session__start_session",
+      "mcp__ccd_session_mgmt__list_sessions"
+    ]
+  }
+}

@@ -23,6 +23,7 @@ export {
 
 const require = createRequire(import.meta.url);
 const core = require('../src/inbox-core.js');
+const reply = require('../src/reply-core.js');
 const wakeCore = require('../native_host/wake-core.js');
 const { DONE_DIR: SYNC_DONE_DIR, REQUESTS_DIR: SYNC_REQUESTS_DIR } = require('../native_host/sync-wake.js');
 
@@ -34,6 +35,8 @@ const ROOT_LIMIT = 8;
 const ROOT_WAIT_DAYS = 7;
 const SYNC_STALE_MS = 10 * 60 * 1000;
 const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const PANEL_DRAFTS_DIR = 'drafts';
+const PANEL_DRAFT_MS = 7 * 24 * 60 * 60 * 1000;
 const BRIEF_CHARS = 6000;
 const FRESH_SYNC_WAIT_MS = Number(process.env.KPH_FRESH_SYNC_MS ?? 12_000);
 const FRESH_SYNC_POLL_MS = 150;
@@ -74,8 +77,47 @@ function attachmentLines(message, files, dialogDir, missing) {
 
 function renderMessage(message, record, files, dialogDir, limit, missing) {
   const who = isClientMessage(message, record) ? 'клиент' : 'я';
-  const text = clip(message.text, limit) || '(без текста)';
-  return [`- [${who} ${formatMoment(message.time)}] ${text}`, ...attachmentLines(message, files, dialogDir, missing)].join('\n');
+  // Предложение, оплата, «Заказ создан» — словами, а не одним заголовком Kwork.
+  const event = message.event ? core.describeInboxEvent(message.event) : '';
+  const own = message.event && message.text === message.event.title ? '' : clip(message.text, limit);
+  const text = [own, event ? `[${event}]` : ''].filter(Boolean).join(' ') || '(без текста)';
+  // «Ответить» и «Цитировать» Kwork: на что именно отвечено.
+  const quote = message.replyTo?.text
+    ? [`  (${message.replyTo.kind === 'quote' ? 'цитата' : 'в ответ на'}: «${clip(message.replyTo.text, 160)}»)`]
+    : [];
+  return [`- [${who} ${formatMoment(message.time)}] ${text}`, ...quote, ...attachmentLines(message, files, dialogDir, missing)].join('\n');
+}
+
+const OPEN_OFFER_MS = 14 * 24 * 60 * 60 * 1000;
+const RECENT_EVENTS_MS = 3 * 24 * 60 * 60 * 1000;
+const RECENT_EVENTS_LIMIT = 5;
+
+// Что висит по деньгам: опции и предложения, которые клиент ещё не оплатил,
+// и свежие события заказа (оплата, отказ, сдача, приёмка).
+export function describeOrderState(record, now) {
+  const lines = [];
+  const events = Array.isArray(record?.events) ? record.events : [];
+  for (const event of events.filter((item) => item.type === 13 && item.status === 'new')) {
+    lines.push(`- ждёт оплаты: ${core.describeTrackEvent(event)}`);
+  }
+
+  // Предложения за две недели — с любым статусом: отказ клиента меняет строку,
+  // и агент видит его без нового сообщения.
+  for (const message of (record?.messages || []).filter((item) => item.event?.type === 'offer_kwork_new')) {
+    if (now - (Date.parse(message.time) || 0) < OPEN_OFFER_MS) {
+      const prefix = message.event.status === 'new' ? 'ждёт оплаты с' : 'предложение';
+      lines.push(`- ${prefix} ${formatMoment(message.time)}: ${core.describeInboxEvent(message.event)}`);
+    }
+  }
+
+  const recent = events
+    .filter((event) => event.wake && !(event.type === 13 && event.status === 'new') && now - (Date.parse(event.time) || 0) < RECENT_EVENTS_MS)
+    .slice(-RECENT_EVENTS_LIMIT);
+  for (const event of recent) {
+    lines.push(`- ${formatMoment(event.time)}: ${core.describeTrackEvent(event)}${event.comment ? ` — «${clip(event.comment, 160)}»` : ''}`);
+  }
+
+  return lines.length > 0 ? ['Заказы и предложения:', ...lines].join('\n') : null;
 }
 
 export function describeTurn(record, now) {
@@ -139,21 +181,29 @@ export function buildDialogBrief({ record, slug, dialogDir, mark, now, budget = 
   const head = `Переписка Kwork с ${slug} (полностью: node ${join(projectRoot, 'scripts', 'kwork-chat.mjs')} ${slug})`;
   const missing = [];
 
+  const orders = describeOrderState(record, now);
   if (fresh === null) {
-    const turn = describeTurn(record, now);
+    const turn = [describeTurn(record, now), orders].filter(Boolean).join('\n');
     const tail = renderWithin(messages.slice(-TAIL_MESSAGES), record, files, dialogDir, TAIL_TEXT_CHARS, budget - head.length - turn.length - 30, missing);
     return {
       text: [head, turn, 'Последние сообщения:', ...tail].join('\n'),
-      mark: messageMark(messages[messages.length - 1]),
+      mark: { ...messageMark(messages[messages.length - 1]), orders },
       missing,
     };
   }
 
+  // Новых сообщений нет, но изменились заказы (опция оплачена, предложение отклонено) —
+  // агент видит это и без побудки.
   if (fresh.length === 0) {
+    // Старая отметка без orders при пустом состоянии — не изменение.
+    if (orders !== (mark.orders ?? null)) {
+      return { text: [head, orders || 'Заказы и предложения: ничего не ждёт оплаты.'].join('\n'), mark: { ...mark, orders }, missing };
+    }
+
     return { text: null, mark, missing };
   }
 
-  const turn = describeTurn(record, now);
+  const turn = [describeTurn(record, now), orders].filter(Boolean).join('\n');
   const shown = renderWithin(fresh.slice(-NEW_MESSAGES_LIMIT), record, files, dialogDir, NEW_TEXT_CHARS, budget - head.length - turn.length - 80, missing);
   const skipped = fresh.length - shown.length;
   return {
@@ -163,15 +213,17 @@ export function buildDialogBrief({ record, slug, dialogDir, mark, now, budget = 
       `Новое с прошлого раза${skipped > 0 ? ` (ещё ${skipped} раньше — в полной переписке)` : ''}:`,
       ...shown,
     ].join('\n'),
-    mark: messageMark(messages[messages.length - 1]),
+    mark: { ...messageMark(messages[messages.length - 1]), orders },
     missing,
   };
 }
 
 // Черновики агента, которых ещё нет в переписке: агент видит, что пользователь
 // их пока не отправил, и не спрашивает об этом.
-export function describePendingDrafts(pending, nicks) {
-  const own = (pending || []).filter((draft) => draft.kind !== 'offer' && (draft.nicks || []).some((nick) => nicks.includes(nick)));
+export function describePendingDrafts(pending, nicks, order = null) {
+  // Черновик чата другого заказа того же клиента — не этого агента.
+  const own = (pending || []).filter((draft) => draft.kind !== 'offer' && (draft.nicks || []).some((nick) => nicks.includes(nick))
+    && !(order && draft.order && draft.order !== order));
   if (own.length === 0) {
     return null;
   }
@@ -180,6 +232,75 @@ export function describePendingDrafts(pending, nicks) {
   return own.length === 1
     ? `Черновик клиенту от ${formatMoment(latest.at)} в переписке пока не появился (отправку сверяю сам, пользователя не спрашивать).`
     : `Черновиков клиенту без отправки: ${own.length}, последний от ${formatMoment(latest.at)} (отправку сверяю сам, пользователя не спрашивать).`;
+}
+
+// Черновик агента из панели на Kwork и что из него ушло. Своё сообщение клиенту
+// всегда будит агента побудкой «Вы написали клиенту»: нет его в переписке — часть
+// не отправлена и клиент её не видел. Строка идёт на каждом ходе, пока всё не уйдёт.
+export function describePanelDraft(draft, record, now, { fresh = true } = {}) {
+  const parts = Array.isArray(draft?.parts) ? draft.parts : [];
+  const at = Date.parse(draft?.at);
+  if (parts.length === 0 || !at || now - at > PANEL_DRAFT_MS) {
+    return null;
+  }
+
+  const progress = reply.draftProgress(draft, record?.messages || [], {
+    clientId: record?.clientId || draft.clientId || null,
+    dialogKey: record?.key || draft.nick || null,
+    events: record?.events || [],
+  });
+  if (progress.finished) {
+    return null;
+  }
+
+  const sent = progress.done;
+  const unsent = parts.map((part) => part.n).filter((n) => !sent.includes(n));
+  const tail = progress.stale ? ' Клиент написал уже после черновика.' : '';
+  // Переписка на диске не свежая — «не отправлен» утверждать нельзя.
+  if (!fresh) {
+    return `Черновик клиенту от ${formatMoment(draft.at)}: ${sent.length > 0 ? `в сохранённой переписке есть части ${sent.join(', ')}, нет частей ${unsent.join(', ')}` : 'в сохранённой переписке его нет'}, но переписка на диске сейчас не свежая — отправлен ли он, неизвестно. Не утверждай ни того, ни другого; сверь переписку, когда выгрузка заработает.${tail}`;
+  }
+
+  if (sent.length === 0) {
+    return `Твой черновик клиенту от ${formatMoment(draft.at)} НЕ отправлен: своего сообщения после него в переписке нет, а каждое отправленное пользователем сообщение приходит побудкой «Вы написали клиенту». Клиент черновик не видел: не считай его сказанным и не спрашивай пользователя, отправил ли он.${tail}`;
+  }
+
+  const many = (list, one, few) => (list.length > 1 ? few : one);
+  return `Из черновика клиенту от ${formatMoment(draft.at)} ${many(sent, 'отправлена часть', 'отправлены части')} ${sent.join(', ')}; ${many(unsent, 'часть', 'части')} ${unsent.join(', ')} НЕ ${many(unsent, 'отправлена', 'отправлены')}, клиент ${many(unsent, 'её', 'их')} не видел.${tail}`;
+}
+
+// Черновики панели этого заказа или этого чата: у клиента бывает несколько заказов,
+// и черновик из чата другого заказа этому агенту не «свой». Старые черновики без
+// отметок — по нику заказа.
+function panelDraftLines(targetDir, { sessionId, order = null, nicks = null, now, fresh = true }) {
+  const dir = join(targetDir, 'data', PANEL_DRAFTS_DIR);
+  let names = [];
+  try {
+    names = readdirSync(dir).filter((name) => name.endsWith('.json'));
+  } catch {
+    return [];
+  }
+
+  const lines = [];
+  for (const name of names) {
+    const slug = name.slice(0, -'.json'.length);
+    if (nicks && !nicks.includes(slug)) {
+      continue;
+    }
+
+    const draft = readJson(join(dir, name));
+    const mine = draft?.session === sessionId || (order && draft?.order === order) || (nicks && !draft?.session && !draft?.order);
+    if (!draft || !mine) {
+      continue;
+    }
+
+    const line = describePanelDraft(draft, readJson(join(targetDir, slug, core.DIALOG_DATA_NAME)), now, { fresh });
+    if (line) {
+      lines.push(nicks?.length === 1 ? line : `${slug}: ${line}`);
+    }
+  }
+
+  return lines;
 }
 
 // Корень Kwork: заказ не выбран, поэтому только кто из клиентов ждёт ответа.
@@ -319,6 +440,9 @@ export function runBrief(input, options = {}) {
   const isStart = input?.hook_event_name === 'SessionStart';
   const state = isStart ? {} : (readJson(statePath) || {});
   const slugs = listSlugs(targetDir);
+  // Свежесть переписки на диске: без неё сводка не утверждает «черновик не отправлен».
+  const briefFresh = !(options.freshSync && options.freshSync.ok === false)
+    && !describeFreshness(readJson(join(targetDir, 'data', '_sync.json')), now);
   const parts = [];
   let hasDialogs = false;
 
@@ -365,7 +489,9 @@ export function runBrief(input, options = {}) {
       state[`${slug}:files`] = waiting.filter((filePath) => !arrived.includes(filePath)).slice(-20);
     }
 
-    const drafts = describePendingDrafts(options.pending, nicks);
+    const panelLines = panelDraftLines(targetDir, { sessionId: input?.session_id, order: context.order, nicks, now, fresh: briefFresh });
+    parts.push(...panelLines);
+    const drafts = panelLines.length > 0 ? null : describePendingDrafts(options.pending, nicks, context.order);
     if (drafts && (isStart || parts.length > 0)) {
       parts.push(drafts);
     }
@@ -396,6 +522,7 @@ export function runBrief(input, options = {}) {
     }
 
     state.__root = new Date(now).toISOString();
+    parts.push(...panelDraftLines(targetDir, { sessionId: input?.session_id, now, fresh: briefFresh }));
   }
 
   if (options.freshSync && options.freshSync.ok === false) {

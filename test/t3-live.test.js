@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { applyShellItem, createT3Live, nextSequence } = require('../native_host/t3-live.js');
+const t3Client = require('../native_host/t3-client.js');
 
 const snapshot = (threads, projects = [{ id: 'p1', title: 'A' }]) => ({ kind: 'snapshot', snapshot: { schemaVersion: 2, snapshotSequence: 10, threads, archivedThreads: [], projects } });
 
@@ -59,4 +60,15 @@ test('курсор догонки двигают события и полный 
   assert.equal(nextSequence(9, snapshot([])), 10);
   // При догонке сервер шлёт дополнение с номером «по сей день» раньше пропущенных событий.
   assert.equal(nextSequence(5, { ...snapshot([]), resolvedRepositoryIdentityRoots: ['/x'] }), 5);
+});
+
+// Будильщик больше не ходит в T3, но файл ещё не удалён (уберём после живой проверки Claude Code).
+test('одна побудка — одни и те же номера команд: повтор не создаёт второе сообщение', () => {
+  const first = t3Client.messageCommand({ seed: 'w1', threadId: 't', text: 'x' });
+  const again = t3Client.messageCommand({ seed: 'w1', threadId: 't', text: 'x' });
+  assert.equal(first.commandId, again.commandId);
+  assert.equal(first.messageId, again.messageId);
+  assert.match(first.commandId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  // Побудка — служебное сообщение: T3 не считает его сообщением пользователя.
+  assert.equal(first.creationSource, 'server');
 });

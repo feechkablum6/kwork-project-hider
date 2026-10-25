@@ -425,3 +425,316 @@ html[data-kph-feed-rendering='true'] .project-list .preloader__ico {
   height: 16px;
   background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'%3E%3Cpath d='M3 9L6 12L12.5 4.5' fill='none' stroke='%23D97757' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center;
 }
+
+/* Черновик агента над полем ввода: части ответа по порядку и одна кнопка,
+   которая готовит текущую часть. Белая поверхность и тонкая граница, как у
+   полей Kwork; текущая часть — светло-зелёной подложкой. */
+.kph-draft {
+  box-sizing: border-box;
+  margin: 0 0 10px;
+  border: 1px solid var(--kph-border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--kph-ink);
+  font: inherit;
+  font-size: 13px;
+  line-height: 18px;
+  text-align: left;
+}
+
+.kph-draft__head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #eef0ee;
+}
+
+.kph-draft__title {
+  font-weight: 600;
+}
+
+.kph-draft__counter {
+  color: var(--kph-ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.kph-draft__link {
+  min-height: 24px;
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: var(--kph-ink-soft);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.kph-draft__head > .kph-draft__link:first-of-type {
+  margin-inline-start: auto;
+}
+
+.kph-draft__link:hover {
+  color: var(--kph-ink);
+  text-decoration: underline;
+}
+
+.kph-draft__parts {
+  max-height: 196px;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.kph-draft__part {
+  display: flex;
+  gap: 10px;
+  padding: 6px 12px;
+}
+
+.kph-draft__part--current {
+  background: #f4fff4;
+}
+
+.kph-draft__num {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--kph-border);
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.kph-draft__part--current .kph-draft__num {
+  border-color: var(--kph-green-deep);
+  background: var(--kph-green-deep);
+  color: #ffffff;
+}
+
+.kph-draft__part--done .kph-draft__num {
+  border-color: #cfe6d0;
+  background: #f4fff4;
+}
+
+/* Отправленная часть — галочкой вместо номера. */
+.kph-draft__part--done .kph-draft__num::before {
+  content: '';
+  width: 4px;
+  height: 8px;
+  margin-top: -2px;
+  border: solid var(--kph-green-deep);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.kph-draft__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.kph-draft__line {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+.kph-draft__mode {
+  flex: none;
+  font-weight: 600;
+}
+
+.kph-draft__target {
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: none;
+  color: var(--kph-focus);
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.kph-draft__target:hover {
+  text-decoration: underline;
+}
+
+.kph-draft__target--static {
+  color: inherit;
+  cursor: default;
+}
+
+.kph-draft__target--static:hover {
+  text-decoration: none;
+}
+
+.kph-draft__text {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--kph-ink-soft);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+
+.kph-draft__part--done .kph-draft__mode,
+.kph-draft__part--done .kph-draft__text,
+.kph-draft__part--done .kph-draft__target {
+  color: #6b726e;
+}
+
+.kph-draft__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding: 8px 12px;
+  border-top: 1px solid #eef0ee;
+}
+
+.kph-draft--collapsed .kph-draft__head {
+  border-bottom: 0;
+}
+
+.kph-draft__prepare,
+.kph-draft__skip {
+  min-height: 32px;
+  padding: 5px 14px;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  cursor: pointer;
+  transition: background-color 160ms ease-out, border-color 160ms ease-out, color 160ms ease-out;
+}
+
+/* Белый на фирменном зелёном держит 3,6:1 — достаточно для 14px полужирного. */
+.kph-draft__prepare {
+  border: 1px solid var(--kph-green-hover);
+  background: var(--kph-green-hover);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.kph-draft__prepare:hover {
+  border-color: var(--kph-green-deep);
+  background: var(--kph-green-deep);
+}
+
+.kph-draft__skip {
+  border: 1px solid var(--kph-border);
+  background: #ffffff;
+  color: var(--kph-ink);
+  font-weight: 500;
+}
+
+.kph-draft__skip:hover {
+  border-color: var(--kph-green);
+  background: #f4fff4;
+  color: var(--kph-green-deep);
+}
+
+.kph-draft__prepare[disabled],
+.kph-draft__skip[disabled] {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.kph-draft__status {
+  flex: 1 1 220px;
+  color: var(--kph-ink-soft);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.kph-draft__status--ok {
+  color: var(--kph-green-deep);
+}
+
+.kph-draft__status--warn {
+  color: #8a4b00;
+}
+
+.kph-draft__link:focus-visible,
+.kph-draft__target:focus-visible,
+.kph-draft__prepare:focus-visible,
+.kph-draft__skip:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--kph-focus) 35%, transparent);
+  outline-offset: 2px;
+}
+
+/* Сообщение клиента, на которое отвечает часть черновика: номер части в углу,
+   текущее — тонкой зелёной рамкой, кусок под цитату — подсветкой текста. */
+.kph-draft-target {
+  position: relative;
+}
+
+.kph-draft-target--current {
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--kph-green) 40%, transparent);
+}
+
+.kph-draft-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 1;
+  box-sizing: border-box;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid var(--kph-green-deep);
+  border-radius: 10px;
+  background: #ffffff;
+  color: var(--kph-green-deep);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.kph-draft-badge--current {
+  background: var(--kph-green-deep);
+  color: #ffffff;
+}
+
+::highlight(kph-draft-quote) {
+  background-color: #ffe58f;
+  color: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kph-draft__prepare,
+  .kph-draft__skip {
+    transition: none;
+  }
+}
+
+.kph-draft__part--skipped .kph-draft__mode,
+.kph-draft__part--skipped .kph-draft__text,
+.kph-draft__part--skipped .kph-draft__target {
+  color: #6b726e;
+}
+
+.kph-draft__part--skipped .kph-draft__num {
+  color: #6b726e;
+}
+
+.kph-draft__flag {
+  flex: none;
+  color: #6b726e;
+  font-size: 12px;
+}

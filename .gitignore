@@ -6,3 +6,6 @@ native_host/bridge-config.json
 # служебная страница автоперезагрузки расширения при разработке
 dev-reload.html
 dev-reload.js
+
+# блокировка расписания живого чата-диспетчера Desktop
+dispatcher/.claude/scheduled_tasks.lock

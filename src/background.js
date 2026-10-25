@@ -1,4 +1,4 @@
-importScripts('inbox-core.js', 'session-sync.js');
+importScripts('inbox-core.js');
 
 const core = globalThis.KworkInboxCore;
 
@@ -895,6 +895,219 @@ async function syncOffers() {
   }
 }
 
+// События заказов: опции, оплата, отказ, сдача и приёмка. Kwork присылает их
+// в трек заказа, а не в переписку; трек читается тем же запросом, что и страница
+// заказа, и прочитанным ничего не отмечает (отметки идут отдельным запросом).
+const ORDERS_EVERY_MS = 3 * 60 * 1000;
+const ORDERS_PER_PASS = 6;
+const ORDER_GAP_MS = 500;
+const ORDER_CLIENTS_KEY = 'orderClients';
+const ORDER_AFTER_CLOSE_MS = 24 * 60 * 60 * 1000;
+const OPEN_OFFERS_EVERY_MS = 10 * 60 * 1000;
+const OPEN_OFFERS_PER_PASS = 4;
+const OPEN_OFFERS_CHECKED_KEY = 'openOffersCheckedAt';
+const PULL_SEEN_KEY = 'pullEventsSeen';
+const ORDER_PULL_EVENTS = new Set(['new_order_track', 'order_changed_status', 'order_updated', 'track_changed', 'refresh_track', 'offer_status_update']);
+// Заказы, о которых сказал живой канал: читаются в ближайшем проходе первыми.
+const ordersNext = new Set();
+let ordersAll = false;
+
+async function fetchOrderTracks(orderId) {
+  const response = await fetch(`${KWORK_ORIGIN}/get_track_limit?id=${encodeURIComponent(orderId)}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+      Accept: 'application/json, text/javascript, */*; q=0.01',
+    },
+    body: JSON.stringify({ track_id: 999999999, limit: 100 }),
+  });
+
+  if (!response.ok) {
+    const error = new Error(`трек заказа ${orderId} вернул ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  const payload = await response.json().catch(() => null);
+  return Array.isArray(payload?.data) ? payload.data : null;
+}
+
+async function fetchManageOrders(tab) {
+  const response = await fetch(`${KWORK_ORIGIN}/get_manage_orders?limit=20${tab ? `&s=${encodeURIComponent(tab)}` : ''}`, {
+    credentials: 'include',
+    headers: { 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json, text/javascript, */*; q=0.01' },
+  });
+  if (!response.ok) {
+    const error = new Error(`список заказов вернул ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  return core.parseManageOrders(await response.json().catch(() => null));
+}
+
+// Живые заказы — со страницы «Заказы»: в работе, на проверке, в арбитраже.
+async function fetchLiveOrders() {
+  const first = await fetchManageOrders('active');
+  if (!first) return [];
+  const orders = [...first.orders];
+  for (const tab of first.tabs.filter((item) => item !== first.tab)) {
+    const next = await fetchManageOrders(tab);
+    orders.push(...(next?.orders || []));
+  }
+
+  return orders;
+}
+
+async function syncOrders(now) {
+  const active = await request({ command: 'active-orders' });
+  const known = Array.isArray(active?.orders) ? active.orders : [];
+  const clients = { ...(await storageGet('local', ORDER_CLIENTS_KEY) || {}) };
+  const urgent = [...ordersNext];
+  ordersNext.clear();
+  const everyone = ordersAll;
+  ordersAll = false;
+  let clientsChanged = false;
+  // Заказ, ушедший из живых (принят, отменён), читается ещё сутки: так видно приёмку.
+  // Список не прочитался (не отказ биржи) — запасной путь: заказы из переписки.
+  let live = null;
+  try {
+    live = await fetchLiveOrders();
+  } catch (error) {
+    if (isKworkRefusal(error)) throw error;
+  }
+
+  for (const order of live || []) {
+    clients[order.orderId] = { ...clients[order.orderId], key: order.key, clientId: order.clientId, seenAt: now };
+    clientsChanged = true;
+  }
+
+  const recent = Object.entries(clients)
+    .filter(([, client]) => now - (Number(client?.seenAt) || 0) < ORDER_AFTER_CLOSE_MS)
+    .map(([orderId]) => orderId);
+  const fallback = live === null ? known.map((order) => order.orderId) : [];
+  // Заказ из живого канала — сразу; остальные — по давности прошлого чтения, чтобы
+  // седьмой заказ не ждал вечно за первыми шестью.
+  const polledAt = (orderId) => Number(clients[orderId]?.polledAt) || 0;
+  const queue = [...new Set([...recent, ...fallback])].filter((orderId) => !urgent.includes(orderId)).sort((left, right) => polledAt(left) - polledAt(right));
+  const ids = [...new Set([...urgent, ...queue])].slice(0, everyone ? ORDERS_PER_PASS * 2 : ORDERS_PER_PASS);
+
+  for (const orderId of ids) {
+    if (syncStopped) break;
+    let tracks;
+    try {
+      tracks = await fetchOrderTracks(orderId);
+    } catch (error) {
+      if (isKworkRefusal(error)) {
+        syncStopped = true;
+        // Не дочитанный заказ из живого канала вернётся в очередь.
+        if (urgent.includes(orderId)) ordersNext.add(orderId);
+        break;
+      }
+
+      continue;
+    }
+
+    if (!tracks) continue;
+    const entry = known.find((order) => order.orderId === orderId);
+    const client = clients[orderId] || (entry ? { key: entry.dialogKey, clientId: entry.clientId } : null) || core.findTrackClient(tracks);
+    if (!client?.key) continue;
+    if (!clients[orderId]) {
+      // Заказ из живого канала или переписки: сутки после последнего чтения.
+      clients[orderId] = { key: client.key, clientId: client.clientId || null, seenAt: now };
+      clientsChanged = true;
+    }
+
+    clients[orderId] = { ...clients[orderId], polledAt: now };
+    clientsChanged = true;
+    await request({
+      command: 'save-order-events',
+      dialogKey: client.key,
+      clientId: client.clientId || null,
+      orderId,
+      events: core.parseTrackEvents(tracks, orderId),
+    });
+    await pause(ORDER_GAP_MS);
+  }
+
+  if (clientsChanged) {
+    const kept = Object.entries(clients).filter(([, client]) => now - (Number(client?.seenAt) || 0) < 30 * ORDER_AFTER_CLOSE_MS);
+    await storageSet('local', { [ORDER_CLIENTS_KEY]: Object.fromEntries(kept.slice(-200)) });
+  }
+
+  return now;
+}
+
+// Отказ от индивидуального предложения Kwork не присылает новым сообщением —
+// статус меняется у старого. Диалоги с неоплаченным предложением перечитываются
+// первой страницей, но только без непрочитанного: обычный путь отмечает прочитанным.
+// Поэтому список диалогов берётся свежий, прямо перед перепроверкой, а диалог,
+// о котором только что сообщил живой канал, ждёт следующего прохода.
+async function recheckOpenOffers() {
+  const open = await request({ command: 'open-offers' });
+  const offers = Array.isArray(open?.dialogs) ? open.dialogs : [];
+  if (offers.length === 0) return;
+  const response = await fetch(`${KWORK_ORIGIN}/inbox`, { credentials: 'include' });
+  if (!response.ok) {
+    const error = new Error(`/inbox вернул ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  const chatList = core.parseChatList(await response.text());
+  const checked = { ...(await storageGet('local', OPEN_OFFERS_CHECKED_KEY) || {}) };
+  const freshEvent = (item) => forcedNext.keys.has(item.key.toLowerCase()) || forcedNext.froms.has(String(item.userId));
+  // Давно не проверенные — первыми: пятое предложение не ждёт вечно за первыми четырьмя.
+  const due = offers
+    .map((offer) => chatList.find((chat) => chat.key.toLowerCase() === String(offer.dialogKey || '').toLowerCase()))
+    .filter((item) => item?.userId && !(item.unread > 0) && !freshEvent(item))
+    .sort((left, right) => (checked[left.key.toLowerCase()] || 0) - (checked[right.key.toLowerCase()] || 0))
+    .slice(0, OPEN_OFFERS_PER_PASS);
+  for (const item of due) {
+    if (syncStopped || freshEvent(item)) continue;
+    let payload;
+    try {
+      payload = await postKworkForm('/inbox_more_messages', { userId: item.userId, allUnread: 'false', limit: '50' });
+    } catch (error) {
+      if (isKworkRefusal(error)) syncStopped = true;
+      continue;
+    }
+
+    checked[item.key.toLowerCase()] = Date.now();
+    const clientId = core.findParticipantId(payload, item.key) || item.userId;
+    const messages = core.filterDialogMessages(core.collectMessages(payload), { dialogKey: item.key, clientId });
+    if (messages.length > 0) {
+      await request({
+        command: 'save-dialog',
+        dialog: { key: item.key, title: item.key, url: `${KWORK_ORIGIN}/inbox/${item.key}`, clientId, updatedAt: new Date().toISOString(), messages },
+      });
+    }
+
+    await pause(ORDER_GAP_MS);
+  }
+
+  await storageSet('local', { [OPEN_OFFERS_CHECKED_KEY]: Object.fromEntries(Object.entries(checked).slice(-100)) });
+}
+
+// Какие события живой канал присылает и с какими полями — для разбора по журналу,
+// без содержимого сообщений.
+async function notePullEvent(frame) {
+  const seen = { ...(await storageGet('local', PULL_SEEN_KEY) || {}) };
+  const entry = seen[frame.event] || { count: 0 };
+  entry.count += 1;
+  entry.at = new Date().toISOString();
+  entry.fields = Object.keys(frame.data && typeof frame.data === 'object' ? frame.data : {}).slice(0, 20);
+  seen[frame.event] = entry;
+  await storageSet('local', { [PULL_SEEN_KEY]: seen });
+}
+
+function orderIdFromPull(data) {
+  const value = data?.order_id ?? data?.orderId ?? data?.order?.id ?? null;
+  return /^\d+$/.test(String(value ?? '')) ? String(value) : null;
+}
+
 async function reportSync(status) {
   const state = { ...status, at: new Date().toISOString() };
   await storageSet('local', { [SYNC_STATE_KEY]: state });
@@ -1013,8 +1226,8 @@ async function syncInbox() {
       }
     }
 
-    // Сообщения читаются сразу: о новом сообщении клиента сообщает будильщик
-    // агентов (мост → Telegram). Непрочитанное читается тихо, без отметки на Kwork.
+    // Сообщения читаются сразу: новое сообщение клиента будильщик агентов передаёт
+    // в чат заказа. Непрочитанное читается тихо, без отметки на Kwork.
     const held = [];
     const savedKeys = [];
     const failedKeys = [];
@@ -1148,6 +1361,28 @@ async function syncInbox() {
         if (isKworkRefusal(error)) syncStopped = true;
         else times.offers = now;
       }
+    }
+
+    if (!syncStopped && (ordersNext.size > 0 || ordersAll || now - (times.orders || 0) >= ORDERS_EVERY_MS)) {
+      try {
+        await syncOrders(now);
+      } catch (error) {
+        // Отказ биржи останавливает проход; прочие сбои ждут следующего интервала.
+        if (isKworkRefusal(error)) syncStopped = true;
+      }
+
+      times.orders = now;
+    }
+
+    if (!syncStopped && now - (times.openOffers || 0) >= OPEN_OFFERS_EVERY_MS) {
+      try {
+        await recheckOpenOffers();
+      } catch (error) {
+        // Перепроверка — запас: сбой ждёт обычного интервала, отказ биржи — паузы.
+        if (isKworkRefusal(error)) syncStopped = true;
+      }
+
+      times.openOffers = now;
     }
 
     if (!syncStopped && now - (times.filesSweep || 0) >= FILES_SWEEP_EVERY_MS) {
@@ -1301,7 +1536,19 @@ function connectPull(url) {
   };
   socket.onmessage = (event) => {
     const frame = core.parsePullFrame(event.data);
-    if (frame && core.isInboxPullEvent(frame.event)) {
+    if (!frame) {
+      return;
+    }
+
+    notePullEvent(frame).catch(() => undefined);
+    const orderId = orderIdFromPull(frame.data);
+    if (orderId) {
+      ordersNext.add(orderId);
+    } else if (ORDER_PULL_EVENTS.has(frame.event)) {
+      ordersAll = true;
+    }
+
+    if (core.isInboxPullEvent(frame.event) || orderId || ORDER_PULL_EVENTS.has(frame.event)) {
       syncFromPull(frame.data, frame.event);
     }
   };
@@ -1466,6 +1713,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     request({ command: 'message-keys', dialogKey: message.dialogKey })
       .then((result) => sendResponse({ keys: result?.ok ? result.keys || [] : [] }))
       .catch(() => sendResponse({ keys: [] }));
+    return true;
+  }
+
+  // Черновик агента для панели над полем ввода. Только чтение: панель сама
+  // ничего не отправляет и в мост не пишет.
+  if (message?.type === 'kph-get-draft' && (message.dialogKey || message.orderId)) {
+    request({ command: 'get-draft', dialogKey: message.dialogKey || null, orderId: message.orderId || null })
+      .then((result) => sendResponse(result?.ok ? result : { draft: null }))
+      .catch(() => sendResponse({ draft: null }));
     return true;
   }
 

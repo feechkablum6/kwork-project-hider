@@ -471,18 +471,20 @@ function newMessagesPayload() {
   };
 }
 
-test('ответ getnewmessages: номер сообщения — MID, пустые служебные отброшены, вложения на месте', () => {
+test('ответ getnewmessages: номер сообщения — MID, «Заказ создан» сохраняется, вложения на месте', () => {
   const parsed = core.parseNewMessages(newMessagesPayload(), { dialogKey: 'stroisnab2007', clientId: '16961627' });
   // Курсор не уходит за первое непрочитанное клиента: следующий запрос снова его вернёт
   // и снова покажет, прочитано ли оно, — иначе пустой ответ сняли бы защиту.
   assert.equal(parsed.maxMid, '411553744');
   // Непрочитанное от клиента есть — обычной выгрузкой этот диалог не трогать.
   assert.equal(parsed.clientUnread, true);
+  // Служебное «Заказ создан» без текста — оплата предложения: агенту оно нужно.
   assert.deepEqual(parsed.messages.map((message) => [message.id, message.authorId, message.text]), [
+    ['411553744', '16961627', 'Заказ создан'],
     ['411561872', '16961627', 'Прайс во вложении'],
     ['411561900', '900', 'Принял'],
   ]);
-  assert.equal(parsed.messages[0].attachments[0].url, 'https://kwork.ru/files/uploaded/fc/3b/e3/7cc450d55f/price.xlsx');
+  assert.equal(parsed.messages[1].attachments[0].url, 'https://kwork.ru/files/uploaded/fc/3b/e3/7cc450d55f/price.xlsx');
   assert.equal(core.parseNewMessages({ success: false }, { dialogKey: 'x' }), null);
   assert.equal(core.parseNewMessages({ success: true, data: {} }, { dialogKey: 'x' }), null);
 });
@@ -494,8 +496,8 @@ test('тихая копия и копия из обычной выгрузки �
     { id: 543639700, MID: 411561900, MSGFROM: 900, MSGTO: 16961627, mfrom: 'AkashiDevelop', mto: 'stroisnab2007', time: 1792080200, message: 'Принял', source_type: 9 },
   ] } });
   const merged = core.mergeMessages(quiet, full);
-  assert.deepEqual(merged.map((message) => message.id), ['411561872', '411561900']);
-  assert.equal(merged[0].attachments.length, 1);
+  assert.deepEqual(merged.map((message) => message.id), ['411553744', '411561872', '411561900']);
+  assert.equal(merged[1].attachments.length, 1);
 });
 
 test('непрочитанное считается только от клиента', () => {

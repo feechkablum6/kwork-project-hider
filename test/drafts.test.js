@@ -447,3 +447,89 @@ test('отложенный диалог, которого нет среди пр
   // Клиент неизвестен, а отложенный диалог старый и в выборку не попал.
   assert.deepEqual(resolveDrafts({ pending: [draft({ nicks: [] })], dialogs: [dialog('petr', [])], claimed: [], now: later, sync }), []);
 });
+
+test('черновик из частей ложится для панели на Kwork: чей он, на что опирается, новый заменяет старый', async () => {
+  const { capture } = await load();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-drafts-'));
+  const kworkRoot = path.join(home, 'Projects', 'Kwork');
+  const targetDir = path.join(kworkRoot, 'переписки');
+  const dataDir = path.join(home, 'data');
+  for (const nick of ['ivan', 'petr']) fs.mkdirSync(path.join(targetDir, nick), { recursive: true });
+  fs.mkdirSync(path.join(kworkRoot, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(kworkRoot, 'docs', 'заказы-клиенты.md'), '');
+  fs.writeFileSync(path.join(targetDir, 'petr', 'данные.json'), JSON.stringify({
+    key: 'Petr', clientId: '77', messages: [
+      { id: '1', time: '2026-10-22T09:00:00.000Z', authorId: '77', authorName: 'Petr', text: 'Сколько по срокам?', orderId: '555' },
+      { id: '2', time: '2026-10-22T09:01:00.000Z', authorId: '1', authorName: 'me', text: 'Смотрю' },
+    ],
+  }));
+  const options = { home, kworkRoot, targetDir, dataDir, orderMapPath: path.join(kworkRoot, 'docs', 'заказы-клиенты.md') };
+  const write = (uuid, text) => fs.writeFileSync(transcript, [
+    { type: 'user', message: { content: '[Kwork-побудка #a1b2c3d4] Клиент ivan написал на Kwork.' } },
+    { type: 'assistant', uuid: 'u0', timestamp: AT, message: { content: [{ type: 'text', text: 'Готово.' }] } },
+    { type: 'user', message: { content: '[Kwork-побудка #b1b2c3d4] Клиент Petr написал на Kwork.' } },
+    { type: 'assistant', uuid, timestamp: AT, message: { content: [{ type: 'text', text }] } },
+  ].map((item) => JSON.stringify(item)).join('\n'));
+  const transcript = path.join(home, 't.jsonl');
+  // Корневой чат Kwork: клиент — из последней побудки.
+  const input = { session_id: 's1', transcript_path: transcript, cwd: kworkRoot };
+  const file = path.join(targetDir, 'data', 'drafts', 'petr.json');
+
+  write('u1', '**1. Ответить на** «Сколько по срокам?»\nСообщение клиенту:\n```\n3 дня.\n```');
+  capture(input, options);
+  const draft = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual([draft.nick, draft.clientId, draft.basedOn, draft.orderId], ['Petr', '77', '2026-10-22T09:00:00.000Z', '555']);
+  assert.deepEqual(draft.parts.map((part) => [part.mode, part.target, part.text]), [['reply', 'Сколько по срокам?', '3 дня.']]);
+  assert.equal(fs.existsSync(path.join(targetDir, 'data', 'drafts', 'ivan.json')), false);
+
+  write('u2', '**1. Обычным сообщением**\nСообщение клиенту:\n```\nНачинаю.\n```');
+  capture(input, options);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).parts[0].text, 'Начинаю.');
+
+  // Ход без частей черновик не трогает.
+  write('u3', 'Проверил логи, всё в порядке.');
+  capture(input, options);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).parts[0].text, 'Начинаю.');
+});
+
+test('агент поправил черновик и не повторил «Ответить на» — в панели ответ остаётся ответом', async () => {
+  const { capture } = await load();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-drafts-'));
+  const kworkRoot = path.join(home, 'Projects', 'Kwork');
+  const targetDir = path.join(kworkRoot, 'переписки');
+  fs.mkdirSync(path.join(targetDir, 'petr'), { recursive: true });
+  fs.mkdirSync(path.join(kworkRoot, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(kworkRoot, 'docs', 'заказы-клиенты.md'), '');
+  const writeDialog = (messages) => fs.writeFileSync(path.join(targetDir, 'petr', 'данные.json'), JSON.stringify({ key: 'Petr', clientId: '77', messages }));
+  const question = { id: '1', time: '2026-10-22T09:00:00.000Z', authorId: '77', authorName: 'Petr', text: 'ОГРН куда?' };
+  writeDialog([question]);
+  const options = { home, kworkRoot, targetDir, dataDir: path.join(home, 'data'), orderMapPath: path.join(kworkRoot, 'docs', 'заказы-клиенты.md') };
+  const transcript = path.join(home, 't.jsonl');
+  const write = (uuid, text) => fs.writeFileSync(transcript, [
+    { type: 'user', message: { content: '[Kwork-побудка #b1b2c3d4] Клиент Petr написал на Kwork.' } },
+    { type: 'assistant', uuid, timestamp: AT, message: { content: [{ type: 'text', text }] } },
+  ].map((item) => JSON.stringify(item)).join('\n'));
+  const input = { session_id: 's1', transcript_path: transcript, cwd: kworkRoot };
+  const file = path.join(targetDir, 'data', 'drafts', 'petr.json');
+  const parts = () => JSON.parse(fs.readFileSync(file, 'utf8')).parts.map((part) => [part.mode, part.target, part.text, 'implicit' in part]);
+
+  write('u1', '**1. Ответить на** «ОГРН куда?»\nСообщение клиенту:\n```\nДлинный ответ про ОГРН.\n```');
+  capture(input, options);
+  write('u2', 'Короче:\n\nСообщение клиенту:\n```\nОГРН не нужен.\n```');
+  capture(input, options);
+  assert.deepEqual(parts(), [['reply', 'ОГРН куда?', 'ОГРН не нужен.', false]]);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).session, 's1');
+
+  // Тот же клиент, чат другого заказа: черновик оттуда — не прошлый вариант этого.
+  write('u2b', 'Сообщение клиенту:\n```\nПо второй задаче всё готово.\n```');
+  capture({ ...input, session_id: 's2' }, options);
+  assert.deepEqual(parts(), [['plain', null, 'По второй задаче всё готово.', false]]);
+  write('u2c', '**1. Ответить на** «ОГРН куда?»\nСообщение клиенту:\n```\nОГРН не нужен.\n```');
+  capture(input, options);
+
+  // Ответ ушёл, следующий черновик без заголовка — уже обычное сообщение.
+  writeDialog([question, { id: '2', time: '2026-10-22T09:05:00.000Z', authorId: '1', authorName: 'me', text: 'ОГРН не нужен.' }]);
+  write('u3', 'Сообщение клиенту:\n```\nИ ещё: выложил на оба стенда.\n```');
+  capture(input, options);
+  assert.deepEqual(parts(), [['plain', null, 'И ещё: выложил на оба стенда.', false]]);
+});
