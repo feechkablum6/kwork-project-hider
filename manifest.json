@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kwork — скрытие проектов",
-  "version": "1.29.0",
+  "version": "1.30.0",
   "description": "Скрывает ненужные проекты на бирже Kwork, извлекает данные заказов, показывает ближайшую выплату и сохраняет переписки с клиентами на диск.",
   "permissions": [
     "storage",
@@ -57,12 +57,23 @@
         "src/payout-content.js",
         "src/report-toggle.js",
         "src/ticks-content.js",
-        "src/reply-content.js"
+        "src/reply-content.js",
+        "src/keepalive-content.js"
       ],
       "css": [
         "src/content.css"
       ],
       "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/restart.html"
+      ],
+      "matches": [
+        "https://kwork.ru/*"
+      ]
     }
   ],
   "icons": {

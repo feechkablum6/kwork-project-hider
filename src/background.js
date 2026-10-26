@@ -1612,6 +1612,12 @@ ensureSyncAlarm();
 getPort();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Проверка страницы Kwork (keepalive-content.js), жив ли фоновый скрипт.
+  if (message?.type === 'kph-ping') {
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message?.type === 'kph-save-dialog' && message.dialog?.key) {
     sendResponse({ accepted: post({ command: 'save-dialog', dialog: message.dialog, sample: message.sample }) });
     trackDownload(downloadAttachments(message.dialog, sender?.tab?.id).catch(() => undefined));

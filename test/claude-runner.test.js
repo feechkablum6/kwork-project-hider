@@ -267,6 +267,13 @@ test('дошло ли сообщение до чата — метка побуд
   fs.appendFileSync(file, `${JSON.stringify({ type: 'user', message: { content: 'Another Claude session sent a message:\n[Kwork-побудка #bb] Клиент' } })}\n`);
   assert.equal(runner.received(file, Buffer.byteLength(old), '[Kwork-побудка #bb]'), true);
   assert.equal(runner.received(path.join(home, 'нет.jsonl'), 0, '[Kwork-побудка #bb]'), false);
+  // Чат был занят: сообщение из очереди вошло в его ход вложением queued_command (так в живом журнале).
+  const busyFrom = fs.statSync(file).size;
+  fs.appendFileSync(file, `${JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: '[Kwork-побудка #cc] Клиент' })}\n`);
+  fs.appendFileSync(file, `${JSON.stringify({ type: 'attachment', attachment: { type: 'hook_additional_context', content: ['[Kwork-побудка #cc]'] } })}\n`);
+  assert.equal(runner.received(file, busyFrom, '[Kwork-побудка #cc]'), false);
+  fs.appendFileSync(file, `${JSON.stringify({ type: 'attachment', attachment: { type: 'queued_command', prompt: 'Another Claude session sent a message:\n[Kwork-побудка #cc] Клиент' } })}\n`);
+  assert.equal(runner.received(file, busyFrom, '[Kwork-побудка #cc]'), true);
 
   assert.equal(runner.inDesktop(ID), false);
   const meta = path.join(home, 'Library', 'Application Support', 'Claude', 'claude-code-sessions', 'acct', 'org');

@@ -291,15 +291,18 @@ function createClaudeRunner({ env = process.env, home = os.homedir(), spawn = ch
     });
   }
 
-  // Дошло ли сообщение до чата: запись user с меткой побудки в его журнале после позиции from. Запись
-  // очереди занятого чата (queue-operation) не в счёт: прерванный ход сбрасывает очередь.
+  // Дошло ли сообщение до чата: метка побудки в его журнале после позиции from — в записи `user`
+  // (свободный чат) или во вложении `queued_command` (занятый чат вставляет сообщение из очереди в
+  // свой ход). Запись очереди (`queue-operation`) не в счёт: прерванный ход сбрасывает очередь.
+  const delivered = (record) => record.type === 'user' || (record.type === 'attachment' && record.attachment?.type === 'queued_command');
+
   function received(file, from, marker) {
     try {
       const fd = fs.openSync(file, 'r');
       try {
         const buffer = Buffer.alloc(Math.max(0, fs.fstatSync(fd).size - from));
         fs.readSync(fd, buffer, 0, buffer.length, from);
-        return buffer.includes(marker) && parseRecords(buffer.toString('utf8'), marker).some((record) => record.type === 'user');
+        return buffer.includes(marker) && parseRecords(buffer.toString('utf8'), marker).some(delivered);
       } finally {
         fs.closeSync(fd);
       }

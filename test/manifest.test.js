@@ -53,6 +53,7 @@ test('content scripts запускаются только на страница�
       'src/report-toggle.js',
       'src/ticks-content.js',
       'src/reply-content.js',
+      'src/keepalive-content.js',
     ],
   );
   assert.deepEqual(contentScript.css, ['src/content.css']);
@@ -118,4 +119,11 @@ test('manifest ссылается на все необходимые разме�
   for (const iconPath of Object.values(manifest.icons)) {
     assert.equal(fs.existsSync(path.join(projectRoot, iconPath)), true, `${iconPath} должен существовать`);
   }
+});
+
+test('служебная страница перезапуска открыта только страницам Kwork', () => {
+  const manifest = readManifest();
+  assert.deepEqual(manifest.web_accessible_resources, [{ resources: ['src/restart.html'], matches: ['https://kwork.ru/*'] }]);
+  assert.equal(fs.existsSync(path.join(projectRoot, 'src/restart.html')), true);
+  assert.match(fs.readFileSync(path.join(projectRoot, 'src/restart.html'), 'utf8'), /<script src="restart\.js"><\/script>/);
 });
