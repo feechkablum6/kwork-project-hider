@@ -30,7 +30,7 @@ test('content scripts запускаются только на страница�
   assert.equal(mainWorldScript.exclude_matches, undefined);
   assert.deepEqual(
     mainWorldScript.js,
-    ['src/core.js', 'src/feed-main.js', 'src/inbox-core.js', 'src/inbox-main.js', 'src/inbox-crawler.js', 'src/ticks-main.js', 'src/reply-main.js'],
+    ['src/core.js', 'src/feed-main.js', 'src/inbox-core.js', 'src/inbox-main.js', 'src/inbox-crawler.js', 'src/ticks-main.js', 'src/reply-main.js', 'src/live-main.js'],
   );
   assert.equal(mainWorldScript.world, 'MAIN');
   assert.equal(mainWorldScript.run_at, 'document_start');
