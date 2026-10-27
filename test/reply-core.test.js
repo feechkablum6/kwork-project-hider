@@ -135,3 +135,16 @@ test('печать «как человек»: по знаку, темп быст
   const perMinute = (sample.length / total) * 60000;
   assert.ok(perMinute > 1000 && perMinute < 1600, String(perMinute));
 });
+
+test('страница потеряла связь с расширением: пусто в полях — обновляется сама, набран текст или файл — только подсказка; обновление не чаще раза в минуту', () => {
+  const now = 10_000_000;
+  assert.equal(reply.orphanAction({ fields: ['', ' \n​'], files: 0, lastReloadAt: 0, now }), 'reload');
+  assert.equal(reply.orphanAction({ fields: ['', 'Добрый день'], files: 0, lastReloadAt: 0, now }), 'notice');
+  // Пустой редактор Kwork хранит в скрытом поле разметку пустой строки.
+  assert.equal(reply.orphanAction({ fields: ['<div><br></div>', '<p>&nbsp;</p>'], files: 0, lastReloadAt: 0, now }), 'reload');
+  assert.equal(reply.orphanAction({ fields: ['<div>Добрый день</div>'], files: 0, lastReloadAt: 0, now }), 'notice');
+  assert.equal(reply.orphanAction({ fields: [], files: 1, lastReloadAt: 0, now }), 'notice');
+  // Только что обновлялись, а связи снова нет — по кругу не обновляем.
+  assert.equal(reply.orphanAction({ fields: [], files: 0, lastReloadAt: now - 30_000, now }), 'notice');
+  assert.equal(reply.orphanAction({ fields: [], files: 0, lastReloadAt: now - 60_000, now }), 'reload');
+});

@@ -98,14 +98,90 @@
         if (after && refreshedFor !== after) refreshField(Boolean(before) && before !== after);
       });
     } catch {
-      // Расширение перезагружено: панель вернётся после обновления страницы, а до
-      // тех пор старый черновик не висит — отправленное он бы уже не увидел.
       loading = false;
-      stop();
-      snapshot = null;
-      progress = null;
-      render();
+      lostExtension();
     }
+  }
+
+  // Расширение перезагружено: старый черновик не висит — отправленное он бы уже не увидел;
+  // панель вернётся после обновления страницы.
+  function lostExtension() {
+    stop();
+    snapshot = null;
+    progress = null;
+    render();
+    if (!globalThis.chrome?.runtime?.id) orphaned();
+  }
+
+  // ---------- связь с расширением потеряна ----------
+
+  const RELOAD_KEY = 'kphOrphanReloadAt';
+  const TEXT_INPUTS = 'input:not([type]), input[type="text"], input[type="number"], input[type="tel"], input[type="email"], input[type="url"], input[type="search"]';
+  let orphanTimer = null;
+  let notice = null;
+  let emptySeen = false;
+
+  // Страница потеряла связь с расширением навсегда: пусто в полях — обновляется сама (и скрытая вкладка:
+  // вернётесь — всё уже на месте); набран текст или прикреплён файл — подсказка, а опустели поля
+  // (сообщение ушло) — обновление.
+  function orphaned() {
+    if (!orphanTimer) orphanTimer = setInterval(checkOrphan, POLL_MS);
+    checkOrphan();
+  }
+
+  function checkOrphan() {
+    let lastReloadAt = 0;
+    try {
+      lastReloadAt = Number(sessionStorage.getItem(RELOAD_KEY)) || 0;
+    } catch {
+      // Хранилище вкладки недоступно — обновление не чаще раза в минуту не гарантировано, но и не нужно.
+    }
+
+    const fields = [
+      ...[...document.querySelectorAll('textarea, [contenteditable="true"]')].map((node) => (node.isContentEditable ? node.innerText : node.value)),
+      // Опции и цена предложения — поля с изменённым значением.
+      ...[...document.querySelectorAll(TEXT_INPUTS)].filter((node) => node.value !== node.defaultValue).map((node) => node.value),
+    ];
+    // Файлы в форме ответа (в ленте у Kwork свои карусели) и выбранная цитата «Ответить»/«Цитировать».
+    const files = (anchor()?.querySelectorAll('.file-list-carousel .swiper-wrapper > *').length || 0)
+      + [...document.querySelectorAll('.js-message-quote-wrap .js-message-quote-remove')].filter((node) => node.offsetParent).length;
+    const action = reply.orphanAction({ fields, files, lastReloadAt, now: Date.now() });
+    // Поля опустели после плашки — возможно, Kwork очистил их по «Отправить», а запрос ещё идёт:
+    // обновление, только если и на следующей проверке пусто.
+    if (action === 'reload' && notice && !emptySeen) {
+      emptySeen = true;
+      return;
+    }
+
+    if (action === 'reload') {
+      try {
+        sessionStorage.setItem(RELOAD_KEY, String(Date.now()));
+      } catch {
+        // Без отметки — только риск лишнего обновления.
+      }
+      window.location.reload();
+      return;
+    }
+
+    emptySeen = false;
+    showReloadNotice();
+  }
+
+  function showReloadNotice() {
+    const target = anchor();
+    if (!target || (notice?.isConnected && notice.nextElementSibling === target)) return;
+    notice?.remove();
+    notice = element('section', 'kph-draft kph-draft--orphan');
+    notice.setAttribute('aria-label', 'Черновик агента');
+    const head = element('div', 'kph-draft__head');
+    head.append(element('span', 'kph-draft__title', 'Расширение обновилось'));
+    const actions = element('div', 'kph-draft__actions');
+    actions.append(button('kph-draft__prepare', 'Обновить страницу', () => window.location.reload()));
+    const text = element('span', 'kph-draft__status kph-draft__status--warn', 'Без обновления черновики агента здесь не появятся. Набранный текст сначала отправьте или скопируйте: после обновления его не будет.');
+    text.setAttribute('role', 'status');
+    actions.append(text);
+    notice.append(head, actions);
+    target.parentElement.insertBefore(notice, target);
   }
 
   function dialogId() {
@@ -568,8 +644,11 @@
     scheduleDecorate();
   }
 
+  // Скрытая вкладка черновик не грузит, но потерю связи с расширением замечает. Проверка до loadDraft:
+  // запрос, оборванный перезагрузкой расширения, ответа не дождётся, и loadDraft больше не пошлёт новый.
   function poll() {
-    if (document.visibilityState === 'visible') loadDraft();
+    if (!globalThis.chrome?.runtime?.id) lostExtension();
+    else if (document.visibilityState === 'visible') loadDraft();
   }
 
   // Kwork дорисовал своё сообщение (или ticks-main подписал блок) — пересчитать,

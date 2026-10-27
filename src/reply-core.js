@@ -12,7 +12,8 @@
   // выставить. Здесь только чистая логика: разбор ответа агента, поиск сообщения
   // клиента, сверка отправленного. Её же используют мост, сводка и панель на Kwork.
 
-  const PART_HEADER = /^\s*(?:[#>*\s]*)\**\s*(\d{1,2})[.)]\s*\**\s*(ответить(?:\s+на)?|цитировать|обычным\s+сообщением|предложение|опция)(?=[\s*:«]|$)\s*\**\s*:?\s*(?:«([\s\S]*?)»)?/i;
+  const ORPHAN_RELOAD_GAP_MS = 60 * 1000;
+  const PART_HEADER =/^\s*(?:[#>*\s]*)\**\s*(\d{1,2})[.)]\s*\**\s*(ответить(?:\s+на)?|цитировать|обычным\s+сообщением|предложение|опция)(?=[\s*:«]|$)\s*\**\s*:?\s*(?:«([\s\S]*?)»)?/i;
   const MESSAGE_MARKER = /^\s*(?:[#>*\s]*)\**\s*сообщение\s+клиенту\s*\**\s*:\s*(.*)$/i;
   const OFFER_MARKER = /^\s*(?:[#>*\s]*)\**\s*предложение\s+клиенту\s*\**\s*:\s*$/i;
   const OPTION_MARKER = /^\s*(?:[#>*\s]*)\**\s*опция\s+клиенту\s*\**\s*:\s*$/i;
@@ -460,6 +461,15 @@
     return extra.length > 0 ? [...list, ...extra] : list;
   }
 
+  // Расширение перезагрузилось, и открытая страница потеряла связь с ним: панель черновиков и прочее
+  // вернутся только после обновления. Ничего не набрано и не прикреплено — 'reload', иначе 'notice'
+  // (обновление стёрло бы набранное). Обновлялись меньше минуты назад — тоже 'notice': не по кругу.
+  // Редактор Kwork держит в скрытом поле разметку: пустая строка — «<div><br></div>».
+  function orphanAction({ fields = [], files = 0, lastReloadAt = 0, now }) {
+    const typed = fields.some((value) => String(value || '').replace(/<[^>]*>|&nbsp;/g, '').replace(/[\s​﻿]/g, '') !== '');
+    return !typed && files === 0 && now - lastReloadAt >= ORPHAN_RELOAD_GAP_MS ? 'reload' : 'notice';
+  }
+
   return {
     MODE_LABELS,
     OFFER_MAX_PRICE,
@@ -477,6 +487,7 @@
     inheritTargets,
     locateFragment,
     normalizeText,
+    orphanAction,
     panelView,
     parseDraftParts,
     parseNumber,
