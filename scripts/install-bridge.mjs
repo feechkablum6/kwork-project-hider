@@ -166,12 +166,16 @@ const macos = {
     const launcherPath = join(hostDir, 'kwork-bridge.sh');
 
     // Chrome запускает мост без пользовательского окружения: в PATH у него только
-    // системные папки, поэтому путь к Node записан целиком. Поиск в PATH остаётся
-    // на случай, когда Node переехал после обновления.
+    // системные папки, поэтому путь к Node записан целиком. Поиск в PATH — когда Node
+    // из установки не запускается: Homebrew при обновлении оставляет старый файл, но
+    // убирает его библиотеки (27.10.2026 мост так молча не стартовал 5 часов).
+    // Node из Homebrew записывается постоянной ссылкой opt/, а не папкой версии в Cellar.
+    const stableNode = process.execPath.replace(/\/Cellar\/([^/]+)\/[^/]+\//, '/opt/$1/');
+    const nodePath = existsSync(stableNode) ? stableNode : process.execPath;
     writeFileSync(launcherPath, `#!/bin/sh
-NODE=${quoteForShell(process.execPath)}
+NODE=${quoteForShell(nodePath)}
 
-if [ ! -x "$NODE" ]; then
+if ! "$NODE" -e '' </dev/null >/dev/null 2>&1; then
   PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
   NODE=$(command -v node)
 fi
