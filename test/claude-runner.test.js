@@ -318,3 +318,25 @@ test('ответил ли агент — по строке итога запус
   // Лога нет — тревога лучше молчания.
   assert.equal(runner.succeeded(path.join(home, 'нет.log'), 0), false);
 });
+
+test('служебная просьба будильщика и ответ на неё — не работа в чате: чат давнего заказа не становится «последним, где работали»', () => {
+  const { runner, home } = makeRunner();
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kph-service-')));
+  const projectDir = path.join(home, '.claude', 'projects', projectSlug(dir));
+  fs.mkdirSync(projectDir, { recursive: true });
+  const file = path.join(projectDir, 'chat.jsonl');
+  fs.writeFileSync(file, record('user', 1_000_000) + record('assistant', 2_000_000));
+  const append = (text) => fs.appendFileSync(file, text);
+  append(record('user', 3_000_000, { message: { content: 'Another Claude session sent a message:\n[Kwork-служебное] Чат-диспетчер уснул' } }));
+  append(record('assistant', 3_100_000, { message: { content: [{ type: 'tool_use', id: 't1', name: 'send_message' }] } }));
+  append(record('user', 3_200_000, { message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'delivered' }] } }));
+  append(record('assistant', 3_300_000, { message: { content: [{ type: 'text', text: 'диспетчер поднят' }] } }));
+  assert.equal(runner.lastActivity(dir), 2_000_000);
+
+  // Дальше обычная работа — снова в счёт; ответ на побудку — тоже.
+  append(record('user', 4_000_000));
+  assert.equal(runner.lastActivity(dir), 4_000_000);
+  append(record('user', 5_000_000, { message: { content: '[Kwork-побудка #ab12] Клиент' } }));
+  append(record('assistant', 5_100_000));
+  assert.equal(runner.lastActivity(dir), 5_100_000);
+});

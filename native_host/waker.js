@@ -53,6 +53,15 @@ const DISPATCHER_LINK_MS = 5 * 60 * 1000;
 const DESKTOP_FRESH_MS = 2 * 60 * 1000;
 const DISPATCHER_CHECK_MS = 10 * 1000;
 const USER_AWAY_MS = 60 * 1000;
+// Desktop держит предел живых чатов: при занятом пределе ссылка только показывает диспетчера, а процесс
+// не поднимает (27.10.2026 побудка так ждала 34 минуты). Сообщение от чата Desktop поднимает его и
+// сверх предела — побудка ждёт диспетчера, а ссылки не было или она не помогла за RELAY_AFTER_LINK_MS,
+// и открытый чат Kwork получает просьбу послать диспетчеру команду расписания, не чаще DISPATCHER_LINK_MS
+// и не больше RELAY_LIMIT раз, пока диспетчер без процесса: не помогло — в чатах заказов не шумим
+// RELAY_RESET_MS, потом снова.
+const RELAY_AFTER_LINK_MS = 60 * 1000;
+const RELAY_LIMIT = 2;
+const RELAY_RESET_MS = 60 * 60 * 1000;
 // Диспетчеру — только строка со ссылкой на файл с текстом побудки: текст клиента до него не доходит
 // (ни подсказок модели, ни искажений при переписывании). Файлы старше WAKE_TEXT_KEEP_MS удаляются.
 const WAKE_TEXTS_DIR = 'wake-texts';
@@ -412,6 +421,8 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
   async function openDispatcher(state, info) {
     const open = info.cwd ? runner.openChat(info.cwd, info.sessionId, false) : null;
     if (!open) return null;
+    // Диспетчер жив — следующий его сон снова разрешает просьбы к чатам Kwork.
+    delete state.dispatcher.relays;
     if (state.dispatcher.pid !== open.pid) {
       await runner.deliver(open, DISPATCHER_SCHEDULE);
       state.dispatcher.pid = open.pid;
@@ -427,6 +438,39 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
     runner.openInDesktop(info.sessionId);
     state.dispatcher.linkAt = now();
     log(`диспетчер спит — будим ссылкой (${reason})`);
+    return true;
+  }
+
+  // Просьба открытому чату Kwork поднять диспетчера: true — ушла. Чаты заказов клиента (avoid) не просим:
+  // побудка этого клиента ждёт, а его же чату служебный ход ни к чему (сам обмен работой не считается —
+  // lastRecordAt его пропускает).
+  async function relayDispatcher(state, info, reason, avoid) {
+    const { dispatcher } = state;
+    if (now() - (dispatcher.relayAt || 0) < DISPATCHER_LINK_MS || now() - (dispatcher.linkAt || 0) < RELAY_AFTER_LINK_MS) return false;
+    // Просьбы не помогли — через RELAY_RESET_MS пробуем снова: иначе побудки ждали бы перезапуска Desktop.
+    if (now() - (dispatcher.relayAt || 0) >= RELAY_RESET_MS) delete dispatcher.relays;
+    if ((dispatcher.relays || 0) >= RELAY_LIMIT) {
+      if (dispatcher.relays === RELAY_LIMIT) log(`диспетчер не поднялся после ${RELAY_LIMIT} просьб к чатам Kwork — ждём (${reason})`);
+      dispatcher.relays = RELAY_LIMIT + 1;
+      return false;
+    }
+
+    const chat = runner.openChatUnder(kworkRoot, info.sessionId, avoid);
+    if (!chat) return false;
+    const before = { relayAt: dispatcher.relayAt, relays: dispatcher.relays };
+    dispatcher.relayAt = now();
+    dispatcher.relays = (dispatcher.relays || 0) + 1;
+    const text = `[Kwork-служебное] Чат-диспетчер уснул, а Claude Desktop не даёт мосту его поднять. Вызови mcp__ccd_session_mgmt__send_message: session_id «${info.localId}», message «${DISPATCHER_SCHEDULE}». Больше ничего не делай; ответ — одна строка «диспетчер поднят» или текст ошибки дословно. Правило — ${rulesPath}, раздел «Служебное: поднять диспетчер».`;
+    try {
+      await runner.deliver(chat, text);
+    } catch (error) {
+      if (!socketGone(error)) throw error;
+      // Чат закрылся между выбором и отправкой — на следующем такте пробуем другой.
+      Object.assign(dispatcher, before);
+      return false;
+    }
+
+    log(`диспетчер спит — просим поднять его чат ${chat.cwd} (${reason})`);
     return true;
   }
 
@@ -611,10 +655,13 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
         throw error;
       });
       if (!dispatcher) {
-        // Пользователь за компьютером — окно не трогаем: побудка ждёт, пока он отойдёт, откроет чат
-        // «Kwork-диспетчер» или запустит Desktop (keepDispatcher). Отошёл — ссылка будит диспетчера, а
-        // закрытый Desktop запускает: агент разберёт сообщение клиента, пока пользователя нет.
-        if (!(runner.userIdleMs() >= USER_AWAY_MS && linkDispatcher(state, info, `побудка ${slug}`)) && !item.waitDispatcher) {
+        // Пользователь за компьютером — окно не трогаем. Отошёл — ссылка будит диспетчера, а закрытый
+        // Desktop запускает: агент разберёт сообщение клиента, пока пользователя нет. Ссылки нет или она
+        // не помогла — просим открытый чат Kwork; такого нет — побудка ждёт, пока пользователь отойдёт,
+        // откроет чат «Kwork-диспетчер» или запустит Desktop (keepDispatcher).
+        const linked = runner.userIdleMs() >= USER_AWAY_MS && linkDispatcher(state, info, `побудка ${slug}`);
+        const relayed = !linked && await relayDispatcher(state, info, `побудка ${slug}`, route.orders.map((order) => order.dir));
+        if (!linked && !relayed && !item.waitDispatcher) {
           log(`побудка ${slug}: ${runner.desktopAgeMs() === null ? 'Desktop закрыт' : 'диспетчер спит'}, вы за компьютером — ждём`);
         }
 

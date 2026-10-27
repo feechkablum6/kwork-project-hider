@@ -73,6 +73,7 @@ function userIdleMs() {
 }
 
 const WAKE_TEXT = '[Kwork-побудка';
+const SERVICE_TEXT = '[Kwork-служебное]';
 
 // Записи журнала (по строке JSON), в тексте которых есть needle; оборванные и чужие строки пропускаются.
 function parseRecords(text, needle = '') {
@@ -108,13 +109,28 @@ function lastRecordAt(file) {
       const from = Math.max(0, size - span);
       const buffer = Buffer.alloc(size - from);
       fs.readSync(fd, buffer, 0, buffer.length, from);
-      const records = parseRecords(buffer.toString('utf8'), '"timestamp"');
+      const text = buffer.toString('utf8');
+      const records = parseRecords(text, '"timestamp"');
+      // Служебная просьба будильщика и ответ на неё — не работа: ответ ассистента в счёт, только если
+      // его ход начат не такой просьбой (иначе чат давнего заказа стал бы «последним, где работали»).
+      const service = text.includes(SERVICE_TEXT);
+      let answer = 0;
       for (let index = records.length - 1; index >= 0; index -= 1) {
-        const at = Date.parse(records[index].timestamp);
-        if (Number.isFinite(at) && isLive(records[index])) return at;
+        const record = records[index];
+        const at = Date.parse(record.timestamp);
+        if (!Number.isFinite(at)) continue;
+        if (!service) {
+          if (isLive(record)) return at;
+        } else if (isRealAssistant(record)) {
+          answer ||= at;
+        } else if (isPrompt(record)) {
+          if (isService(record)) answer = 0;
+          else if (answer) return answer;
+          else if (isLiveUser(record)) return at;
+        }
       }
 
-      if (from === 0 || span >= TAIL_MAX_BYTES) return 0;
+      if (from === 0 || span >= TAIL_MAX_BYTES) return answer;
     }
   } catch {
     return 0;
@@ -129,12 +145,25 @@ function isRealAssistant(record) {
   return record.type === 'assistant' && !record.isApiErrorMessage && record.message?.model !== '<synthetic>';
 }
 
-// Настоящее сообщение человека: не результат инструмента, не служебная запись и не наша побудка.
-function isLiveUser(record) {
-  if (record.isMeta) return false;
+const blocksOf = (record) => {
   const content = record.message?.content;
-  const blocks = Array.isArray(content) ? content : [{ type: 'text', text: String(content ?? '') }];
-  return !blocks.some((block) => block?.type === 'tool_result' || (typeof block?.text === 'string' && block.text.includes(WAKE_TEXT)));
+  return Array.isArray(content) ? content : [{ type: 'text', text: String(content ?? '') }];
+};
+const hasText = (record, marker) => blocksOf(record).some((block) => typeof block?.text === 'string' && block.text.includes(marker));
+
+// Запись, которой начинается ход: сообщение в чат, а не результат инструмента и не служебная запись.
+function isPrompt(record) {
+  return record.type === 'user' && !record.isMeta && !blocksOf(record).some((block) => block?.type === 'tool_result');
+}
+
+// Просьба будильщика открытому чату поднять диспетчера.
+function isService(record) {
+  return hasText(record, SERVICE_TEXT);
+}
+
+// Настоящее сообщение человека: не результат инструмента, не служебная запись и не наши побудка или просьба.
+function isLiveUser(record) {
+  return isPrompt(record) && !hasText(record, WAKE_TEXT) && !isService(record);
 }
 
 // Живая работа в чате: ответ ассистента или сообщение человека.
@@ -263,6 +292,25 @@ function createClaudeRunner({ env = process.env, home = os.homedir(), spawn = ch
       const at = file ? lastRecordAt(file.file) : 0;
       if (item.sessionId !== sessionId && at === 0) continue;
       if (!best || at > best.at || (at === best.at && item.sessionId === sessionId)) best = { item, at };
+    }
+
+    return best?.item || null;
+  }
+
+  // Свободный открытый чат Desktop внутри папки root с живой перепиской, кроме чата except и папок avoid;
+  // из таких — с самой старой записью: в самом свежем скорее всего сейчас пишет пользователь. null — такого
+  // нет. Занятый или ждущий ответа пользователя чат держит входящее в очереди; временный процесс Desktop
+  // без переписки — не чат (см. openChat).
+  function openChatUnder(root, except, avoid = []) {
+    const inside = (dir, bases) => cwdVariants(dir).some((variant) => bases.some((base) => variant === base || variant.startsWith(`${base}/`)));
+    const roots = cwdVariants(root);
+    const avoided = avoid.flatMap(cwdVariants);
+    let best = null;
+    for (const item of openChats()) {
+      if (item.sessionId === except || (item.status && item.status !== 'idle') || !inside(item.cwd, roots) || inside(item.cwd, avoided)) continue;
+      const file = transcript(item.cwd, item.sessionId);
+      const at = file ? lastRecordAt(file.file) : 0;
+      if (at > 0 && (!best || at < best.at)) best = { item, at };
     }
 
     return best?.item || null;
@@ -411,7 +459,7 @@ function createClaudeRunner({ env = process.env, home = os.homedir(), spawn = ch
     open(`claude://resume?session=${sessionId}`);
   }
 
-  return { deliver, desktopChats, desktopInFront: front, desktopAgeMs, userIdleMs: idle, holders, inDesktop, isRunning, lastActivity, latestChat, newSessionId: () => crypto.randomUUID(), openChat, openInDesktop, received, start, succeeded, transcript };
+  return { deliver, desktopChats, desktopInFront: front, desktopAgeMs, userIdleMs: idle, holders, inDesktop, isRunning, lastActivity, latestChat, newSessionId: () => crypto.randomUUID(), openChat, openChatUnder, openInDesktop, received, start, succeeded, transcript };
 }
 
 module.exports = {

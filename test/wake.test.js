@@ -374,6 +374,70 @@ test('диспетчер спит, а вы за компьютером — ок�
   world.claude.closeDesktopChats();
 });
 
+test('диспетчер не поднимается ссылкой (Desktop держит предел живых чатов) — свободный открытый чат Kwork просят поднять его, не чаще раза в 5 минут и не больше двух раз', async () => {
+  const { world, id, advance, now } = await worldWithChat();
+  world.dispatcher({ open: false });
+  // Открытые чаты Kwork: park — свободный, с самой старой записью; cafe — свободный, свежее (в нём,
+  // скорее всего, сейчас пишет пользователь); quiz — самый свежий, но ждёт ответа пользователя; home — вне Kwork.
+  const openAt = (name, at, status = 'idle') => {
+    const dir = path.join(world.kworkRoot, 'Активные', name);
+    fs.mkdirSync(dir, { recursive: true });
+    world.claude.say(dir, `${name}-cli`, at);
+    world.claude.openDesktopChat(dir, `${name}-cli`, { status });
+    return dir;
+  };
+  const parkDir = openAt('park', now() - 3000);
+  openAt('cafe', now() - 2000);
+  openAt('quiz', now() - 1000, 'waiting');
+  world.claude.say(world.home, 'home-cli', now());
+  world.claude.openDesktopChat(world.home, 'home-cli');
+  // Папки заказов клиента из маршрута не просим.
+  assert.equal(world.claude.runner.openChatUnder(world.kworkRoot, 'disp-cli', [parkDir]).sessionId, 'cafe-cli');
+  const asks = () => world.claude.inbox.filter((item) => item.user.message.content.startsWith('[Kwork-служебное]'));
+
+  // Вы отошли — сначала ссылка; процесса нет и через минуту — просьба открытому чату.
+  world.claude.idleMs = 2 * 60 * 1000;
+  advance(60 * 60 * 1000);
+  world.save(second);
+  await wait(world, advance, 30 * 1000);
+  assert.deepEqual(world.claude.opened.slice(1), ['claude://resume?session=disp-cli']);
+  assert.equal(asks().length, 0);
+  await wait(world, advance, 40 * 1000);
+  await world.claude.waitInbox(1);
+  assert.equal(asks().length, 1);
+  assert.equal(asks()[0].sessionId, 'park-cli');
+  const ask = asks()[0].user.message.content;
+  assert.match(ask, /send_message/);
+  assert.match(ask, /local_disp-cli/);
+  assert.match(ask, /\[Kwork-диспетчер\] расписание/);
+  assert.equal(world.claude.inbox.length, 1, 'вне Kwork и ждущему ответа чату — ничего');
+
+  // Вы за компьютером: ссылки нет, повторная просьба — не раньше чем через 5 минут, третьей нет.
+  world.claude.idleMs = 0;
+  await wait(world, advance, 4 * 60 * 1000);
+  assert.equal(asks().length, 1);
+  await wait(world, advance, 60 * 1000);
+  await world.claude.waitInbox(2);
+  assert.equal(asks().length, 2);
+  await wait(world, advance, 6 * 60 * 1000);
+  assert.equal(asks().length, 2);
+  assert.equal(world.logs.filter((line) => /не поднялся после 2 просьб/.test(line)).length, 1);
+  assert.equal(world.claude.opened.length, 2);
+  // Через час после последней просьбы снова разрешены две: иначе побудки ждали бы перезапуска Desktop.
+  await wait(world, advance, 60 * 60 * 1000);
+  await world.claude.waitInbox(4);
+  assert.equal(asks().length, 4);
+
+  // Диспетчер поднялся — побудка уходит через него, следующий его сон снова разрешает просьбы.
+  world.dispatcher();
+  advance(2000);
+  await world.waker.tick();
+  await world.claude.waitInbox(6);
+  assert.equal(world.claude.dispatched[0].localId, `local_${id}`);
+  assert.equal(world.stateOf().dispatcher.relays, undefined);
+  world.claude.closeDesktopChats();
+});
+
 test('диспетчер без процесса: после запуска Desktop будится сразу, дальше — только когда вы отошли, и не чаще раза в 5 минут', async () => {
   const { world, advance } = await worldWithChat();
   world.dispatcher({ open: false });
