@@ -12,15 +12,10 @@ const OTHER = '9a26a5ee-3cc0-4d60-9f61-0943c40e3d06';
 
 function makeRunner(options = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-runner-'));
-  const calls = [];
-  const handlers = {};
   const opened = [];
-  const spawn = (bin, args, spawnOptions) => {
-    calls.push({ bin, args, options: spawnOptions });
-    return { pid: options.noPid ? undefined : 4321, on: (name, handler) => { handlers[name] = handler; }, unref() { calls.at(-1).unref = true; } };
-  };
-  const runner = createClaudeRunner({ env: { PATH: '/usr/bin', ...options.env }, home, spawn, processes: () => options.processes || [], open: (url) => opened.push(url) });
-  return { runner, home, calls, handlers, opened, logFile: path.join(home, 'logs', 'run.log') };
+  const notified = [];
+  const runner = createClaudeRunner({ env: { PATH: '/usr/bin', ...options.env }, home, processes: () => options.processes || [], open: (url) => opened.push(url), notify: (note) => notified.push(note) });
+  return { runner, home, opened, notified };
 }
 
 test('каталог журнала claude — путь, где каждый не буквенно-цифровой символ заменён на «-»', () => {
@@ -36,45 +31,17 @@ test('список процессов читается из ps: pid и полн�
   assert.ok(mine.args.includes(path.basename(process.execPath)) || mine.args.includes('node'));
 });
 
-test('новый чат: --session-id, папка заказа, модель, режим разрешений, отвязанный запуск', () => {
-  const { runner, home, calls, logFile } = makeRunner({ env: { PWD: '/somewhere/else' } });
-  const result = runner.start({ dir: '/k/shop', text: 'привет', sessionId: ID, logFile });
-  assert.deepEqual(result, { pid: 4321, logFrom: 0 });
-  const [call] = calls;
-  assert.equal(call.bin, path.join(home, '.local', 'bin', 'claude'));
-  assert.deepEqual(call.args, ['-p', '--session-id', ID, '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--model', 'claude-opus-5-5', '--effort', 'high', 'привет']);
-  assert.equal(call.options.cwd, '/k/shop');
-  assert.equal(call.options.detached, true);
-  assert.equal(call.options.env.PATH, '/usr/bin:/opt/homebrew/bin:/usr/local/bin');
-  // Stop-хук решает по "$PWD": от моста он достался бы чужой.
-  assert.equal(call.options.env.PWD, '/k/shop');
-  assert.equal(call.unref, true);
-  assert.ok(fs.existsSync(logFile));
-});
-
-test('продолжение: --resume; лог дописывается, итог второго запуска ищется с его позиции', () => {
-  const { runner, calls, logFile } = makeRunner();
-  runner.start({ dir: '/k/shop', text: 'т', sessionId: ID, resume: true, logFile });
-  assert.deepEqual(calls[0].args.slice(0, 3), ['-p', '--resume', ID]);
-  assert.ok(!calls[0].args.includes('--session-id') && !calls[0].args.includes('--fork-session'));
-
-  fs.appendFileSync(logFile, 'итог первого\n');
-  const second = runner.start({ dir: '/k/shop', text: 'т', sessionId: ID, resume: true, logFile });
-  assert.equal(second.logFrom, Buffer.byteLength('итог первого\n'));
-});
-
-test('бинарь, модель и уровень переопределяются переменными окружения', () => {
-  const { runner, calls, logFile } = makeRunner({ env: { KPH_CLAUDE_BIN: '/x/claude', KPH_CLAUDE_MODEL: 'm1', KPH_CLAUDE_EFFORT: 'low' } });
-  runner.start({ dir: '/k', text: 'т', sessionId: ID, logFile });
-  assert.equal(calls[0].bin, '/x/claude');
-  assert.deepEqual(calls[0].args.slice(7, 11), ['--model', 'm1', '--effort', 'low']);
-});
-
-test('claude не запустился: ошибка выбрасывается, а ошибка процесса не роняет мост', () => {
-  const { runner, handlers, logFile } = makeRunner({ noPid: true });
-  assert.throws(() => runner.start({ dir: '/k', text: 'т', sessionId: ID, logFile }), /claude не запустился/);
-  assert.equal(typeof handlers.error, 'function');
-  assert.doesNotThrow(() => handlers.error(new Error('ENOENT')));
+test('пустой чат: журнал с названием и вводной строкой там, где его ищет claude, без запуска модели; второй раз тот же номер не пишется', () => {
+  const { runner } = makeRunner();
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kph-seed-')));
+  runner.seed({ dir, sessionId: ID, name: 'shop', text: 'Чат клиента ivan', at: 1_000_000 });
+  const file = runner.transcript(dir, ID);
+  assert.ok(file);
+  const [title, intro] = fs.readFileSync(file.file, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.deepEqual(title, { type: 'custom-title', customTitle: 'shop', sessionId: ID });
+  assert.deepEqual([intro.type, intro.cwd, intro.sessionId, intro.message.content, intro.timestamp], ['user', dir, ID, 'Чат клиента ivan', new Date(1_000_000).toISOString()]);
+  assert.equal(runner.lastActivity(dir), 1_000_000);
+  assert.throws(() => runner.seed({ dir, sessionId: ID, name: 'x', text: 'x', at: 2 }), /EEXIST/);
 });
 
 test('чат держит чужой процесс (--resume id, --session-id id); процесс самого Desktop (--resume=id) не в счёт; Desktop запущен — по главному процессу', () => {
@@ -99,14 +66,6 @@ test('чат держит чужой процесс (--resume id, --session-id i
   assert.equal(elapsedMs('кривое'), null);
 });
 
-test('запуск жив только если pid совпал и это именно его чат', () => {
-  const { runner } = makeRunner({ processes: [{ pid: 4321, args: `/bin/bash /x/run -p --session-id ${ID} т` }, { pid: 99, args: '/usr/bin/other' }] });
-  assert.equal(runner.isRunning(4321, ID), true);
-  assert.equal(runner.isRunning(4321, OTHER), false, 'pid занят чужим процессом');
-  assert.equal(runner.isRunning(99, ID), false);
-  assert.equal(runner.isRunning(1, ID), false);
-});
-
 test('журнал чата находится по папке заказа, в том числе при другой записи имени (NFC/NFD)', () => {
   const { runner, home } = makeRunner();
   const dir = path.join(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kph-dir-'))), 'Йод');
@@ -123,18 +82,13 @@ test('журнал чата находится по папке заказа, в 
   assert.equal(found.mtimeMs, fs.statSync(file).mtimeMs);
 });
 
-test('показ чата в Desktop — адрес claude://resume?session=<id>', () => {
-  const { runner, opened } = makeRunner();
+test('показ чата в Desktop — адрес claude://resume?session=<id>; уведомление уходит как есть', () => {
+  const { runner, opened, notified } = makeRunner();
   runner.openInDesktop(ID);
   assert.deepEqual(opened, [`claude://resume?session=${ID}`]);
+  runner.notify({ title: 't', message: 'm', url: 'u', group: 'g' });
+  assert.deepEqual(notified, [{ title: 't', message: 'm', url: 'u', group: 'g' }]);
   assert.match(runner.newSessionId(), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-});
-
-test('PWD запуска — папка заказа, остальное окружение моста как есть', () => {
-  const { runner, calls, logFile } = makeRunner({ env: { PWD: '/Applications/Chrome', HOME: '/h', FOO: '1' } });
-  runner.start({ dir: '/k/Активные/shop', text: 'т', sessionId: ID, logFile });
-  const { env } = calls[0].options;
-  assert.deepEqual([env.PWD, env.HOME, env.FOO], ['/k/Активные/shop', '/h', '1']);
 });
 
 const record = (type, at, extra = {}) => `${JSON.stringify({ type, ...(at ? { timestamp: new Date(at).toISOString() } : {}), ...extra })}\n`;
@@ -284,39 +238,8 @@ test('дошло ли сообщение до чата — метка побуд
   assert.equal(runner.inDesktop(ID), true);
   // Чат в архиве Desktop — тоже в Desktop, но в списке его не видно.
   fs.writeFileSync(path.join(meta, 'local_z.json'), JSON.stringify({ sessionId: 'local_z', cliSessionId: OTHER, isArchived: true, cwd: '/k/shop' }));
-  assert.deepEqual(runner.desktopChats().get(OTHER), { localId: 'local_z', archived: true, cwd: '/k/shop' });
-  assert.deepEqual(runner.desktopChats().get(ID), { localId: 'local_y', archived: false, cwd: null });
-});
-
-test('ответил ли агент — по строке итога запуска в логе с его позиции, а не по журналу чата', () => {
-  const { runner, home, logFile } = makeRunner();
-  const line = (record) => `${JSON.stringify(record)}\n`;
-  const result = (isError, text = 'ок') => line({ type: 'result', subtype: 'success', is_error: isError, result: text, session_id: ID });
-  const noise = 'Warning: no stdin data received in 3s\n[claude-code:warn] {"x":1}\n';
-  fs.mkdirSync(path.dirname(logFile), { recursive: true });
-
-  fs.writeFileSync(logFile, noise + result(false));
-  assert.equal(runner.succeeded(logFile, 0), true);
-  // Ошибка API и лимит — is_error: true при subtype "success", в том числе после вызовов инструментов.
-  fs.writeFileSync(logFile, noise + result(true, 'API Error: Connection lost mid-response'));
-  assert.equal(runner.succeeded(logFile, 0), false);
-  fs.writeFileSync(logFile, result(true, "You've hit your usage limit"));
-  assert.equal(runner.succeeded(logFile, 0), false);
-  // Процесс оборвался: строки итога нет, а удачный итог прошлого запуска того же чата — до позиции.
-  const old = result(false);
-  fs.writeFileSync(logFile, old + noise);
-  assert.equal(runner.succeeded(logFile, Buffer.byteLength(old)), false);
-  fs.writeFileSync(logFile, old + result(true, 'API Error'));
-  assert.equal(runner.succeeded(logFile, Buffer.byteLength(old)), false);
-  fs.writeFileSync(logFile, result(true, 'API Error') + result(false));
-  assert.equal(runner.succeeded(logFile, Buffer.byteLength(result(true, 'API Error'))), true);
-  // Оборванная строка итога и пустой лог — не ответ.
-  fs.writeFileSync(logFile, result(false).slice(0, 30));
-  assert.equal(runner.succeeded(logFile, 0), false);
-  fs.writeFileSync(logFile, '');
-  assert.equal(runner.succeeded(logFile, 0), false);
-  // Лога нет — тревога лучше молчания.
-  assert.equal(runner.succeeded(path.join(home, 'нет.log'), 0), false);
+  assert.deepEqual(runner.desktopChats().get(OTHER), { localId: 'local_z', archived: true, cwd: '/k/shop', title: null });
+  assert.deepEqual(runner.desktopChats().get(ID), { localId: 'local_y', archived: false, cwd: null, title: null });
 });
 
 test('служебная просьба будильщика и ответ на неё — не работа в чате: чат давнего заказа не становится «последним, где работали»', () => {

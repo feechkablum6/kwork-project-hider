@@ -99,7 +99,7 @@ test('побудка при нескольких заказах: чужое со
   assert.doesNotMatch(text, /t3_|T3|settled/);
 });
 
-function createWorld({ now, hang = false } = {}) {
+function createWorld({ now } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-wake-'));
   const kworkRoot = path.join(home, 'Kwork');
   const targetDir = path.join(kworkRoot, 'переписки');
@@ -112,17 +112,18 @@ function createWorld({ now, hang = false } = {}) {
   fs.mkdirSync(path.join(targetDir, 'data'), { recursive: true });
   fs.writeFileSync(path.join(targetDir, 'data', 'dispatcher.json'), JSON.stringify({ localId: 'local_disp-cli' }));
   const save = (messages) => handleCommand(targetDir, { command: 'save-dialog', dialog: { key: 'ivan', clientId: '501', messages } });
-  const claude = createFakeClaude({ home, now, hang });
+  const claude = createFakeClaude({ home, now });
   const logs = [];
   const waker = createWaker({ targetDir, kworkRoot, runner: claude.runner, log: (line) => logs.push(line), ...(now ? { now } : {}) });
   const stateOf = () => JSON.parse(fs.readFileSync(path.join(targetDir, 'data', 'wake-state.json'), 'utf8'));
   // Диспетчер в Desktop: открыт (open = true) или только в списке Desktop, без процесса.
   const dispatcher = ({ open = true } = {}) => (open ? claude.openDispatcher(dispatcherDir) : claude.addToDesktop('disp-cli', { cwd: dispatcherDir }));
-  return { save, claude, runs: claude.runs, waker, logs, stateOf, dispatcher, home, kworkRoot, targetDir, orderDir, dispatcherDir };
+  return { save, claude, waker, logs, stateOf, dispatcher, home, kworkRoot, targetDir, orderDir, dispatcherDir };
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const argAfter = (run, flag) => run.args[run.args.indexOf(flag) + 1];
+// Записи журнала пустого чата, который завёл мост.
+const seedOf = (world, dir, id) => fs.readFileSync(world.claude.runner.transcript(dir, id).file, 'utf8').trim().split('\n').map((item) => JSON.parse(item));
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 // Время идёт, а мост тикает, как настоящий (шагами по 10 с): больший разрыв он счёл бы сном мака.
 const wait = async (world, advance, ms) => {
@@ -134,115 +135,96 @@ const wait = async (world, advance, ms) => {
 // Полный текст побудки из файла, на который указывает строка диспетчера.
 const wakeFile = (text) => fs.readFileSync(/в файле (\S+\.md):/.exec(text)[1], 'utf8');
 
-test('первый запуск не будит по старой переписке; новое сообщение клиента без чата — агент сразу в новом чате, потом чат в Desktop', async () => {
-  const world = createWorld();
+test('первый запуск не будит по старой переписке; новое сообщение клиента без чата — пустой чат в Desktop, побудка уходит туда, агент в фоне не запускается', async () => {
+  let clock = Date.parse('2026-10-14T10:00:00Z');
+  const world = createWorld({ now: () => clock });
   world.save([message(1, 0, 'client', 'старое')]);
   await world.waker.tick();
-  assert.equal(world.runs.length, 0);
+  assert.deepEqual(world.stateOf().chats, {});
 
   world.save([message(1, 0, 'client', 'старое'), message(2, 5, 'client', 'новое')]);
   await world.waker.tick();
-  assert.equal(world.runs.length, 1);
-  const [run] = world.runs;
-  assert.equal(run.args[0], '-p');
-  assert.match(argAfter(run, '--session-id'), UUID);
-  assert.ok(!run.args.includes('--resume') && !run.args.includes('--fork-session'));
-  assert.equal(argAfter(run, '--permission-mode'), 'bypassPermissions');
-  assert.equal(argAfter(run, '--model'), 'claude-opus-5-5');
-  assert.equal(argAfter(run, '--effort'), 'high');
-  // Название чата в Desktop — имя проекта заказа (правило названий чатов).
-  assert.equal(argAfter(run, '--name'), 'shop');
-  assert.match(run.text, /новое/);
-  assert.equal(run.options.cwd, world.orderDir);
-  assert.equal(run.options.detached, true);
-  assert.equal(run.bin, path.join(world.home, '.local', 'bin', 'claude'));
-  assert.ok(run.options.env.PATH.endsWith(':/opt/homebrew/bin:/usr/local/bin'));
-  assert.ok(fs.existsSync(path.join(world.targetDir, 'data', 'wake-runs', `${run.sessionId}.log`)));
   const chat = world.stateOf().chats[world.orderDir];
-  assert.equal(chat.sessionId, run.sessionId);
-  // Запуск кончился, пользователь не в Desktop — чат добавлен в список ссылкой resume.
-  assert.deepEqual(world.claude.opened, [`claude://resume?session=${run.sessionId}`]);
-  assert.equal(chat.imported, true);
+  assert.match(chat.sessionId, UUID);
+  // Название чата в Desktop — имя проекта заказа (правило названий чатов); модель не запускалась.
+  const [title, intro, ...rest] = seedOf(world, world.orderDir, chat.sessionId);
+  assert.deepEqual(title, { type: 'custom-title', customTitle: 'shop', sessionId: chat.sessionId });
+  assert.equal(intro.type, 'user');
+  assert.equal(intro.cwd, fs.realpathSync(world.orderDir));
+  assert.match(intro.message.content, /^Чат клиента ivan на Kwork \(заказ shop\)\. Сюда приходят побудки моста, правила — \S+побудка\.md\.$/);
+  assert.deepEqual(rest, []);
+  // Пользователь не в Desktop — чат добавлен в список ссылкой resume; побудка ещё не разобрана.
+  assert.deepEqual(world.claude.opened, [`claude://resume?session=${chat.sessionId}`]);
+  assert.ok(world.stateOf().pending.ivan);
 
-  // Тот же диалог без нового — второй побудки нет.
-  world.save([message(1, 0, 'client', 'старое'), message(2, 5, 'client', 'новое')]);
+  // Desktop поднял чат — побудка приходит в него.
+  world.claude.openDesktopChat(world.orderDir, chat.sessionId);
+  clock += 2000;
   await world.waker.tick();
-  assert.equal(world.runs.length, 1);
-});
-
-test('сбой запуска не теряет побудку (повтор), ответ пользователя её снимает', async () => {
-  const world = createWorld();
-  world.save([message(1, 0, 'me', 'жду')]);
+  await world.claude.waitInbox(1);
+  assert.match(world.claude.inbox[0].user.message.content, /новое/);
+  clock += 2000;
   await world.waker.tick();
-
-  world.claude.failWith = 'claude не запустился';
-  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'вопрос')]);
-  await world.waker.tick();
-  assert.equal(world.runs.length, 0);
-  assert.equal(world.stateOf().pending.ivan.attempts, 1);
-  assert.ok(world.logs.some((line) => /побудка ivan не удалась \(попытка 1\): claude не запустился/.test(line)));
-
-  // Пользователь ответил с телефона, пока агент не запускался: будить уже незачем.
-  world.claude.failWith = null;
-  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'вопрос'), mine(3, 6, 'ответ')]);
-  await world.waker.tick();
-  assert.equal(world.runs.length, 0);
-  assert.equal(world.stateOf().pending.ivan, undefined);
-});
-
-test('агент ещё работает в своём новом чате — второй запуск после его конца, в том же чате и только с новым', async () => {
-  let clock = Date.parse('2026-10-14T10:00:00Z');
-  const world = createWorld({ now: () => clock, hang: true });
-  world.save([message(1, 0, 'me', 'жду')]);
-  await world.waker.tick();
-  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое')]);
-  await world.waker.tick();
-  assert.equal(world.runs.length, 1);
-
-  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое'), message(3, 6, 'client', 'второе')]);
-  clock += 10 * 1000;
-  await world.waker.tick();
-  assert.equal(world.runs.length, 1);
-  assert.deepEqual(world.claude.opened, [], 'чат не показывается, пока по маршруту ждёт побудка');
-
-  world.claude.finish(world.runs[0].pid);
-  clock += 10 * 1000;
-  await world.waker.tick();
-  assert.equal(world.runs.length, 2);
-  assert.match(world.runs[1].text, /второе/);
-  assert.doesNotMatch(world.runs[1].text, /первое/);
-  assert.deepEqual(world.runs[1].args.slice(0, 3), ['-p', '--resume', world.runs[0].sessionId]);
-  assert.ok(!world.runs[1].args.includes('--name'));
-
-  world.claude.finish(world.runs[1].pid);
-  await world.waker.tick();
-  assert.deepEqual(world.claude.opened, [`claude://resume?session=${world.runs[0].sessionId}`]);
-  await world.waker.tick();
+  assert.equal(world.stateOf().handled.ivan, '2');
   assert.equal(world.claude.opened.length, 1, 'показ в Desktop — один раз');
+  world.claude.closeDesktopChats();
 });
 
-test('пока пользователь в Claude Desktop, новый чат в список не добавляется: ссылка переключила бы окно', async () => {
-  const world = createWorld();
+test('пока пользователь работает в Claude Desktop, окно не трогаем: одно уведомление со ссылкой на чат; ушёл из Desktop — чат добавляется сам', async () => {
+  let clock = Date.parse('2026-10-14T10:00:00Z');
+  const world = createWorld({ now: () => clock });
   world.claude.front = true;
   world.save([message(1, 0, 'me', 'жду')]);
   await world.waker.tick();
   world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое')]);
-  await world.waker.tick();
-  await world.waker.tick();
-  assert.equal(world.runs.length, 1);
+  await wait(world, (ms) => { clock += ms; }, 60 * 1000);
+  const { sessionId } = world.stateOf().chats[world.orderDir];
   assert.deepEqual(world.claude.opened, []);
+  assert.deepEqual(world.claude.notified, [{ title: 'Kwork: новый чат ivan', message: 'Клиент написал — нажмите, чтобы открыть чат в Claude', url: `claude://resume?session=${sessionId}`, group: `kph-${sessionId}` }]);
 
-  // Пока чата нет в Desktop, следующая побудка — тем же чатом в фоне.
+  // Клиент дописал, пока чат не показан, — чат тот же, уведомление не повторяется.
   world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое'), message(3, 9, 'client', 'второе')]);
-  await world.waker.tick();
-  assert.deepEqual(world.runs[1].args.slice(0, 3), ['-p', '--resume', world.runs[0].sessionId]);
+  await wait(world, (ms) => { clock += ms; }, 20 * 1000);
+  assert.equal(world.stateOf().chats[world.orderDir].sessionId, sessionId);
+  assert.equal(world.claude.notified.length, 1);
 
   world.claude.front = false;
-  await world.waker.tick();
-  assert.deepEqual(world.claude.opened, [`claude://resume?session=${world.runs[0].sessionId}`]);
+  await wait(world, (ms) => { clock += ms; }, 10 * 1000);
+  assert.deepEqual(world.claude.opened, [`claude://resume?session=${sessionId}`]);
 });
 
-// Клиент написал, агент отработал в новом чате, чат добавлен в список Desktop.
+test('Desktop на переднем плане, а вы отошли от компьютера — чат добавляется сам', async () => {
+  const world = createWorld();
+  world.claude.front = true;
+  world.claude.idleMs = 2 * 60 * 1000;
+  world.save([message(1, 0, 'me', 'жду')]);
+  await world.waker.tick();
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое')]);
+  await world.waker.tick();
+  assert.equal(world.claude.opened.length, 1);
+  assert.deepEqual(world.claude.notified, []);
+});
+
+test('Desktop не взял чат по ссылке — повтор через 2 минуты, после трёх ссылок только уведомление; побудка ждёт', async () => {
+  let clock = Date.parse('2026-10-14T10:00:00Z');
+  const world = createWorld({ now: () => clock });
+  world.claude.desktopImports = false;
+  world.save([message(1, 0, 'me', 'жду')]);
+  await world.waker.tick();
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'вопрос')]);
+  await wait(world, (ms) => { clock += ms; }, 110 * 1000);
+  assert.equal(world.claude.opened.length, 1);
+  await wait(world, (ms) => { clock += ms; }, 20 * 1000);
+  assert.equal(world.claude.opened.length, 2);
+  assert.equal(new Set(world.claude.opened).size, 1, 'тот же чат');
+  await wait(world, (ms) => { clock += ms; }, 10 * 60 * 1000);
+  assert.equal(world.claude.opened.length, 3);
+  assert.equal(world.claude.notified.length, 1);
+  assert.equal(world.logs.filter((line) => /Desktop не взял чат \S+ после 3 ссылок — ждём/.test(line)).length, 1);
+  assert.equal(world.stateOf().pending.ivan.lastId, '2', 'побудка ждёт чат и не теряется');
+});
+
+// Клиент написал, мост завёл чат и показал его в Desktop, побудка дошла в сокет; чат закрыт.
 async function worldWithChat() {
   let clock = Date.parse('2026-10-14T10:00:00Z');
   const world = createWorld({ now: () => clock });
@@ -250,9 +232,18 @@ async function worldWithChat() {
   await world.waker.tick();
   world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое')]);
   await world.waker.tick();
-  assert.equal(world.runs.length, 1);
-  assert.deepEqual(world.claude.opened, [`claude://resume?session=${world.runs[0].sessionId}`]);
-  return { world, id: world.runs[0].sessionId, advance: (ms) => { clock += ms; }, now: () => clock };
+  const id = world.stateOf().chats[world.orderDir].sessionId;
+  assert.deepEqual(world.claude.opened, [`claude://resume?session=${id}`]);
+  world.claude.openDesktopChat(world.orderDir, id);
+  clock += 2000;
+  await world.waker.tick();
+  await world.claude.waitInbox(1);
+  clock += 2000;
+  await world.waker.tick();
+  assert.equal(world.stateOf().pending.ivan, undefined);
+  world.claude.closeDesktopChats();
+  world.claude.inbox.length = 0;
+  return { world, id, advance: (ms) => { clock += ms; }, now: () => clock };
 }
 
 const second = [message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое'), message(3, 9, 'client', 'второе')];
@@ -265,7 +256,6 @@ test('чат заказа открыт в Desktop — побудка сразу 
   world.save(second);
   await world.waker.tick();
   await world.claude.waitInbox(1);
-  assert.equal(world.runs.length, 1);
   const got = world.claude.inbox.find((item) => item.sessionId === id);
   assert.deepEqual(got.auth, { type: 'auth', token: `key-${pid}` });
   assert.match(got.user.message.content, /^\[Kwork-побудка #\w+\] Клиент ivan написал/);
@@ -289,7 +279,6 @@ test('чат заказа спит в Desktop — побудка через ди
   world.save(second);
   await world.waker.tick();
   await world.claude.waitInbox(2);
-  assert.equal(world.runs.length, 1);
   // Новый процесс диспетчера сначала получает команду расписания.
   assert.equal(world.claude.schedules, 1);
   assert.equal(world.claude.dispatched.length, 1);
@@ -343,7 +332,6 @@ test('диспетчер спит, вы отошли от компьютера �
   assert.deepEqual(world.claude.opened.slice(1), ['claude://resume?session=disp-cli']);
   await wait(world, advance, 4 * 60 * 1000);
   assert.equal(world.claude.opened.length, 2);
-  assert.equal(world.runs.length, 1, 'чат заказа в Desktop — в фоне не запускается');
 
   world.dispatcher();
   advance(2000);
@@ -472,7 +460,6 @@ test('Desktop закрыт — побудка ждёт, пока вы за ко�
   await wait(world, advance, 3 * 60 * 1000);
   assert.equal(world.claude.opened.length, 1);
   assert.ok(world.logs.some((line) => /побудка ivan: Desktop закрыт, вы за компьютером — ждём/.test(line)));
-  assert.equal(world.runs.length, 1, 'чат заказа в Desktop — в фоне не запускается');
   world.claude.idleMs = 2 * 60 * 1000;
   await wait(world, advance, 10 * 1000);
   assert.deepEqual(world.claude.opened.slice(1), ['claude://resume?session=disp-cli']);
@@ -682,7 +669,6 @@ test('чат заказа держит терминал — побудка пр�
   await world.waker.tick();
   await settle();
   assert.deepEqual(world.claude.dispatched, []);
-  assert.equal(world.runs.length, 1);
   assert.equal(world.stateOf().pending.ivan, undefined);
   assert.ok(world.logs.some((line) => /занят процессом вне Desktop/.test(line)));
   world.claude.closeDesktopChats();
@@ -710,9 +696,46 @@ test('пользователь работает в своём чате этог�
   world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'вопрос')]);
   await world.waker.tick();
   await world.claude.waitInbox(1);
-  assert.equal(world.runs.length, 0);
   assert.equal(world.claude.inbox[0].sessionId, 'chat-of-user');
   assert.equal(world.stateOf().chats[world.orderDir].sessionId, 'chat-of-user');
+  world.claude.closeDesktopChats();
+});
+
+test('заказ заведён из чата в корне Kwork, в папке заказа чатов нет — побудки идут в чат Desktop с названием заказа, нового чата нет', async () => {
+  let clock = Date.parse('2026-10-14T10:00:00Z');
+  const world = createWorld({ now: () => clock });
+  world.save([message(1, 0, 'me', 'жду')]);
+  await world.waker.tick();
+  world.claude.say(world.kworkRoot, 'user-chat', clock - 60 * 1000);
+  world.claude.addToDesktop('user-chat', { cwd: world.kworkRoot, title: 'shop' });
+  // Одноимённые: вне Kwork, архивная копия и давний чат в корне — не он.
+  world.claude.addToDesktop('elsewhere', { cwd: world.home, title: 'shop' });
+  world.claude.addToDesktop('old-copy', { cwd: world.kworkRoot, title: 'shop', archived: true });
+  world.claude.say(world.kworkRoot, 'stale-chat', clock - 5 * 60 * 60 * 1000);
+  world.claude.addToDesktop('stale-chat', { cwd: world.kworkRoot, title: 'shop' });
+  world.claude.openDesktopChat(world.kworkRoot, 'user-chat');
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(1);
+  assert.equal(world.claude.inbox[0].sessionId, 'user-chat');
+  clock += 2000;
+  await world.waker.tick();
+  assert.equal(world.stateOf().pending.ivan, undefined);
+  assert.equal(world.stateOf().chats[world.orderDir].sessionId, 'user-chat');
+
+  // Чат уснул — следующая побудка через диспетчера в него же и подтверждается по его журналу.
+  world.claude.closeDesktopChats();
+  world.dispatcher();
+  clock += 60 * 1000;
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое'), message(3, 9, 'client', 'второе')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(3);
+  assert.equal(world.claude.dispatched[0].localId, 'local_user-chat');
+  clock += 2000;
+  await world.waker.tick();
+  assert.equal(world.stateOf().handled.ivan, '3');
+  assert.deepEqual(world.claude.opened, []);
+  assert.deepEqual(world.claude.notified, []);
   world.claude.closeDesktopChats();
 });
 
@@ -726,9 +749,9 @@ test('клиент без заказа, а в корне Kwork открыт чу
   world.claude.openDesktopChat(world.kworkRoot, 'otklik-chat');
   world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'вопрос')]);
   await world.waker.tick();
-  assert.equal(world.runs.length, 1);
-  assert.equal(world.runs[0].options.cwd, world.kworkRoot);
-  assert.notEqual(world.runs[0].sessionId, 'otklik-chat');
+  const { sessionId } = world.stateOf().chats[`${world.kworkRoot}::ivan`];
+  assert.notEqual(sessionId, 'otklik-chat');
+  assert.ok(world.claude.runner.transcript(world.kworkRoot, sessionId));
   assert.deepEqual(world.claude.inbox, []);
   world.claude.closeDesktopChats();
 });
@@ -745,7 +768,6 @@ test('у заказа свежий чат вне Desktop (T3) и старый ч
   world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'вопрос')]);
   await world.waker.tick();
   await world.claude.waitInbox(2);
-  assert.equal(world.runs.length, 0);
   assert.deepEqual(world.claude.dispatched.map((item) => [item.localId, item.archived]), [['local_chat-in-desktop', true]]);
   assert.deepEqual(world.claude.opened, []);
   world.claude.closeDesktopChats();
@@ -762,7 +784,6 @@ test('ваше сообщение клиенту, а чат пользовате
   world.save([message(1, 0, 'client', 'вопрос'), mine(2, 5, 'ответил')]);
   await world.waker.tick();
   await world.claude.waitInbox(2);
-  assert.equal(world.runs.length, 0);
   assert.match(world.claude.dispatched[0].text, /Вы написали клиенту ivan/);
   world.claude.closeDesktopChats();
 });
@@ -773,53 +794,7 @@ test('своё сообщение без чата клиента — новый 
   await world.waker.tick();
   world.save([message(1, 0, 'client', 'вопрос'), mine(2, 5, 'ответил')]);
   await world.waker.tick();
-  assert.equal(world.runs.length, 0);
   assert.equal(world.stateOf().pending.ivan, undefined);
-});
-
-test('запуск умер, не создав чат — чат в Desktop не просится, причина в логе', async () => {
-  const world = createWorld();
-  world.claude.silent = true;
-  world.save([message(1, 0, 'me', 'жду')]);
-  await world.waker.tick();
-  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое')]);
-  await world.waker.tick();
-  assert.equal(world.runs.length, 1);
-  assert.deepEqual(world.claude.opened, []);
-  assert.ok(world.logs.some((line) => /агент заказа shop не запустился, лог: .*wake-runs\//.test(line)));
-  assert.equal(world.stateOf().chats[world.orderDir], undefined);
-});
-
-for (const mode of ['noAnswer', 'apiError']) {
-  test(`агент не ответил (${mode}: лимит, ошибка API) — причина в логе, чат всё равно показан в Desktop`, async () => {
-    const world = createWorld();
-    world.claude[mode] = true;
-    world.save([message(1, 0, 'me', 'жду')]);
-    await world.waker.tick();
-    world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое')]);
-    await world.waker.tick();
-    const [run] = world.runs;
-    assert.ok(world.logs.some((line) => line === `агент не ответил на побудку ivan (лимит или ошибка), лог: ${path.join(world.targetDir, 'data', 'wake-runs', `${run.sessionId}.log`)}`));
-    assert.deepEqual(world.claude.opened, [`claude://resume?session=${run.sessionId}`]);
-  });
-}
-
-test('агент не ответил при продолжении чата: прошлый удачный итог в логе не в счёт', async () => {
-  let clock = Date.parse('2026-10-14T10:00:00Z');
-  const world = createWorld({ now: () => clock });
-  world.claude.front = true;
-  world.save([message(1, 0, 'me', 'жду')]);
-  await world.waker.tick();
-  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое')]);
-  await world.waker.tick();
-  assert.ok(!world.logs.some((line) => /не ответил/.test(line)), 'ответил — в логе чисто');
-
-  world.claude.noAnswer = true;
-  clock += 3 * 60 * 1000;
-  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое'), message(3, 9, 'client', 'второе')]);
-  await world.waker.tick();
-  assert.deepEqual(world.runs[1].args.slice(0, 2), ['-p', '--resume']);
-  assert.equal(world.logs.filter((line) => /не ответил/.test(line)).length, 1);
 });
 
 test('при двух заказах побудка идёт в тот, где работали последним, — по любому журналу в папке, и чату пользователя в Desktop тоже', async () => {
@@ -834,16 +809,16 @@ test('при двух заказах побудка идёт в тот, где �
 
     // Будильщик в этих папках ещё не работал; пользователь сам работал в одной из них полчаса
     // назад. В другой последняя запись давняя, но Desktop, держащий тот чат, только что дописал
-    // служебные записи. Чатов Desktop там нет — агент в новом чате.
+    // служебные записи. Чатов Desktop там нет — новый чат там, где работали последним.
     const other = newest === 'shop' ? 'park' : 'shop';
     world.claude.say(dirs[newest], 'chat-of-user', clock - 30 * 60 * 1000);
     world.claude.say(dirs[other], 'old-chat', clock - 5 * 60 * 60 * 1000);
     world.claude.service(dirs[other], 'old-chat', clock - 1000);
     world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'вопрос')]);
     await world.waker.tick();
-    assert.equal(world.runs.length, 1);
-    assert.equal(world.runs[0].options.cwd, dirs[newest], `свежий журнал в ${newest}`);
-    assert.match(world.runs[0].text, new RegExp(`Заказ ${newest}: папка`));
+      const chat = world.stateOf().chats[dirs[newest]];
+    assert.ok(chat, `свежий журнал в ${newest}`);
+    assert.equal(seedOf(world, dirs[newest], chat.sessionId)[0].customTitle, newest);
   }
 });
 
@@ -961,11 +936,11 @@ test('переписку дописали, пока будильщик разб�
   fs.mkdirSync(orderDir, { recursive: true });
   const save = (messages) => handleCommand(targetDir, { command: 'save-dialog', dialog: { key: 'ivan', clientId: '501', messages } });
   const claude = createFakeClaude({ home });
-  const sent = claude.runs;
   fs.mkdirSync(path.join(kworkRoot, 'docs'), { recursive: true });
   fs.writeFileSync(path.join(kworkRoot, 'docs', 'заказы-клиенты.md'), '- shop: ivan\n');
   let interleave = null;
   const waker = createWaker({ targetDir, kworkRoot, runner: claude.runner, onCollected: () => { interleave?.(); interleave = null; } });
+  const pending = () => JSON.parse(fs.readFileSync(path.join(targetDir, 'data', 'wake-state.json'), 'utf8')).pending.ivan;
 
   save([message(1, 0, 'me', 'жду')]);
   await waker.tick();
@@ -973,10 +948,9 @@ test('переписку дописали, пока будильщик разб�
   // Второй мост дописал сообщение клиента ровно между чтением и снятием отметок.
   interleave = () => save([message(1, 0, 'me', 'жду'), message(2, 5, 'me', 'ещё'), message(3, 6, 'client', 'вопрос')]);
   await waker.tick();
-  assert.equal(sent.length, 0);
+  assert.equal(pending(), undefined);
   await waker.tick();
-  assert.equal(sent.length, 1);
-  assert.match(sent[0].text, /вопрос/);
+  assert.equal(pending().lastId, '3');
 });
 
 test('клиент без заказа: чат в корне Kwork свой у каждого клиента, следующая побудка идёт в него же', async () => {
@@ -992,16 +966,18 @@ test('клиент без заказа: чат в корне Kwork свой у �
   world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое')]);
   savePetr([{ ...message(1, 0, 'me', 'жду'), recipientId: '502', recipientName: 'petr' }, petr(2, 6, 'привет')]);
   await world.waker.tick();
-  assert.equal(world.runs.length, 2);
-  assert.ok(world.runs.every((run) => run.options.cwd === world.kworkRoot));
-  assert.deepEqual(world.runs.map((run) => argAfter(run, '--name')).sort(), ['ivan', 'petr']);
-  assert.notEqual(world.runs[0].sessionId, world.runs[1].sessionId);
-  assert.deepEqual(Object.keys(world.stateOf().chats).sort(), [`${world.kworkRoot}::ivan`, `${world.kworkRoot}::petr`]);
+  const chats = world.stateOf().chats;
+  assert.deepEqual(Object.keys(chats).sort(), [`${world.kworkRoot}::ivan`, `${world.kworkRoot}::petr`]);
+  const ivan = chats[`${world.kworkRoot}::ivan`].sessionId;
+  const petrChat = chats[`${world.kworkRoot}::petr`].sessionId;
+  assert.notEqual(ivan, petrChat);
+  assert.equal(seedOf(world, world.kworkRoot, ivan)[0].customTitle, 'ivan');
+  assert.equal(seedOf(world, world.kworkRoot, petrChat)[0].customTitle, 'petr');
+  assert.match(seedOf(world, world.kworkRoot, ivan)[1].message.content, /^Чат клиента ivan на Kwork\. /);
 
   world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое'), message(3, 9, 'me', 'ок'), message(4, 10, 'client', 'второе')]);
   await world.waker.tick();
-  assert.equal(world.runs.length, 3);
-  assert.deepEqual(world.runs[2].args.slice(0, 3), ['-p', '--resume', world.runs.find((run) => /первое/.test(run.text)).sessionId]);
+  assert.equal(world.stateOf().chats[`${world.kworkRoot}::ivan`].sessionId, ivan, 'следующая побудка — в тот же чат');
 });
 
 test('чат-диспетчер не найден в Desktop — побудка не теряется: повторы, причина в логе', async () => {
@@ -1011,7 +987,6 @@ test('чат-диспетчер не найден в Desktop — побудка 
   await world.waker.tick();
   assert.equal(world.stateOf().pending.ivan.attempts, 1);
   assert.ok(world.logs.some((line) => /чат-диспетчер не найден в Claude Desktop/.test(line)));
-  assert.equal(world.runs.length, 1);
 });
 
 test('команда пересылки оставляет заявку будильщику; неверные аргументы или нет такого заказа — подсказка, заявки нет', async () => {

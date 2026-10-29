@@ -1,7 +1,7 @@
 // Транспорт будильщика: чаты Claude Desktop (метаданные, открытые чаты и их сокеты), сообщение в
-// сокет открытого чата, `claude -p` для чата, которого в Desktop ещё нет, и показ его в Desktop
-// ссылкой resume. Всё, что трогает систему (запуск, список процессов, `open`, передний план),
-// принимается параметрами, чтобы тесты подменяли это без настоящего claude.
+// сокет открытого чата, пустой чат для клиента, которого в Desktop ещё нет, и показ его в Desktop
+// ссылкой resume или уведомлением. Всё, что трогает систему (список процессов, `open`, уведомление,
+// передний план), принимается параметрами, чтобы тесты подменяли это без настоящего Desktop.
 
 const childProcess = require('node:child_process');
 const crypto = require('node:crypto');
@@ -10,9 +10,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 
-const DEFAULT_MODEL = 'claude-opus-5-5';
-const DEFAULT_EFFORT = 'high';
-// Мост запускает Chrome с бедным PATH: claude и его помощникам нужны homebrew-каталоги.
+// Мост запускает Chrome с бедным PATH: terminal-notifier стоит в homebrew-каталоге.
 const EXTRA_PATH = '/opt/homebrew/bin:/usr/local/bin';
 
 // Каталог журналов claude: путь папки, где каждый символ не [A-Za-z0-9] заменён на «-».
@@ -43,6 +41,22 @@ function listProcesses() {
 function openUrl(url) {
   const child = childProcess.spawn('/usr/bin/open', ['-g', url], { stdio: 'ignore', detached: true });
   child.on('error', () => {});
+  child.unref();
+}
+
+// Уведомление macOS, по нажатию открывает url (terminal-notifier из Homebrew; group — одно уведомление
+// на чат). Нет terminal-notifier или он сбоит — report(причина), а чат добавится, когда пользователь выйдет
+// из Desktop.
+function notifyUser({ title, message, url, group }, report = () => {}) {
+  const child = childProcess.spawn('terminal-notifier', ['-title', title, '-message', message, '-open', url, '-group', group, '-sound', 'default'], {
+    stdio: 'ignore',
+    detached: true,
+    env: { ...process.env, PATH: [process.env.PATH, EXTRA_PATH].filter(Boolean).join(':') },
+  });
+  child.on('error', (error) => report(error?.message || String(error)));
+  child.on('exit', (code) => {
+    if (code) report(`код выхода ${code}`);
+  });
   child.unref();
 }
 
@@ -171,14 +185,11 @@ function isLive(record) {
   return isRealAssistant(record) || (record.type === 'user' && isLiveUser(record));
 }
 
-function createClaudeRunner({ env = process.env, home = os.homedir(), spawn = childProcess.spawn, processes = listProcesses, open = openUrl, front = desktopInFront, idle = userIdleMs, log = () => {} } = {}) {
+function createClaudeRunner({ env = process.env, home = os.homedir(), processes = listProcesses, open = openUrl, notify = notifyUser, front = desktopInFront, idle = userIdleMs, log = () => {} } = {}) {
   const configDir = env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
   const projectsDir = path.join(configDir, 'projects');
   const sessionsDir = path.join(configDir, 'sessions');
   const desktopSessionsDir = path.join(home, 'Library', 'Application Support', 'Claude', 'claude-code-sessions');
-  const bin = env.KPH_CLAUDE_BIN || path.join(home, '.local', 'bin', 'claude');
-  const model = env.KPH_CLAUDE_MODEL || DEFAULT_MODEL;
-  const effort = env.KPH_CLAUDE_EFFORT || DEFAULT_EFFORT;
 
   // claude берёт каталог по настоящему cwd; имя на диске бывает в NFC и в NFD.
   function cwdVariants(dir) {
@@ -377,7 +388,7 @@ function createClaudeRunner({ env = process.env, home = os.homedir(), spawn = ch
         else if (depth === 2 && /^local_.*\.json$/.test(entry.name)) {
           try {
             const meta = JSON.parse(fs.readFileSync(full, 'utf8'));
-            if (typeof meta.cliSessionId === 'string') chats.set(meta.cliSessionId, { localId: meta.sessionId, archived: meta.isArchived === true, cwd: meta.cwd || null });
+            if (typeof meta.cliSessionId === 'string') chats.set(meta.cliSessionId, { localId: meta.sessionId, archived: meta.isArchived === true, cwd: meta.cwd || null, title: meta.title || null });
           } catch {
             // Desktop переписывает файл прямо сейчас.
           }
@@ -392,29 +403,6 @@ function createClaudeRunner({ env = process.env, home = os.homedir(), spawn = ch
     return desktopChats().has(sessionId);
   }
 
-  // Ответил ли агент на побудку — по итогу самого запуска, а не по журналу чата: с
-  // `--output-format json` claude последней строкой лога пишет {"type":"result","is_error":…}.
-  // Ошибка API и лимит дают is_error: true (subtype при этом "success"), обрыв процесса — нет
-  // строки итога. Лог дописывается при каждом запуске чата, поэтому читаем с позиции запуска.
-  function succeeded(logFile, from) {
-    let text;
-    try {
-      const fd = fs.openSync(logFile, 'r');
-      try {
-        const buffer = Buffer.alloc(Math.max(0, fs.fstatSync(fd).size - from));
-        fs.readSync(fd, buffer, 0, buffer.length, from);
-        text = buffer.toString('utf8');
-      } finally {
-        fs.closeSync(fd);
-      }
-    } catch {
-      return false;
-    }
-
-    const result = parseRecords(text, '"type":"result"').filter((record) => record.type === 'result').at(-1);
-    return result?.is_error === false;
-  }
-
   // Чат держит чужой процесс — терминал или наш `claude -p` (`--resume <id>`, `--session-id <id>`); процесс
   // самого Desktop (`--resume=<id>`) не в счёт: в свой чат Desktop доставит сам.
   function holders(sessionId) {
@@ -427,39 +415,24 @@ function createClaudeRunner({ env = process.env, home = os.homedir(), spawn = ch
     return main ? main.ageMs ?? Infinity : null;
   }
 
-  // pid совпал и это запуск именно этого чата: номера процессов переиспользуются.
-  function isRunning(pid, sessionId) {
-    return processes().some((item) => item.pid === pid && item.args.includes(sessionId));
-  }
-
-  // Новый чат: { sessionId }; продолжить: { sessionId, resume: true }.
-  // name — название чата (запись custom-title в журнале); Desktop берёт его при добавлении в список.
-  function start({ dir, text, sessionId, resume = false, name, logFile }) {
-    const session = resume ? ['--resume', sessionId] : ['--session-id', sessionId];
-    const args = ['-p', ...session, ...(name ? ['--name', name] : []), '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--model', model, '--effort', effort, text];
-    fs.mkdirSync(path.dirname(logFile), { recursive: true });
-    const fd = fs.openSync(logFile, 'a');
-    const logFrom = fs.fstatSync(fd).size;
-    let child;
-    try {
-      // PWD по папке заказа: Stop-хук решает по "$PWD", а от моста он достался бы чужой.
-      child = spawn(bin, args, { cwd: dir, env: { ...env, PWD: dir, PATH: [env.PATH, EXTRA_PATH].filter(Boolean).join(':') }, detached: true, stdio: ['ignore', fd, fd] });
-    } finally {
-      fs.closeSync(fd);
-    }
-
-    // Без обработчика ошибка запуска (нет бинаря) уронила бы весь мост.
-    child.on('error', (error) => log(`claude не запущен: ${error?.message || error}`));
-    child.unref();
-    if (!child.pid) throw new Error(`claude не запустился (${bin})`);
-    return { pid: child.pid, logFrom };
+  // Пустой чат: журнал с названием (custom-title — его Desktop берёт в список) и вводной строкой, без
+  // запуска модели. В список Desktop его добавляет openInDesktop, работает агент уже там.
+  function seed({ dir, sessionId, name, text, at }) {
+    const [cwd] = cwdVariants(dir);
+    const file = path.join(projectsDir, projectSlug(cwd), `${sessionId}.jsonl`);
+    const records = [
+      { type: 'custom-title', customTitle: name, sessionId },
+      { type: 'user', parentUuid: null, isSidechain: false, userType: 'external', entrypoint: 'cli', uuid: crypto.randomUUID(), timestamp: new Date(at).toISOString(), cwd, sessionId, message: { role: 'user', content: text } },
+    ];
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, records.map((record) => `${JSON.stringify(record)}\n`).join(''), { flag: 'wx' });
   }
 
   function openInDesktop(sessionId) {
     open(`claude://resume?session=${sessionId}`);
   }
 
-  return { deliver, desktopChats, desktopInFront: front, desktopAgeMs, userIdleMs: idle, holders, inDesktop, isRunning, lastActivity, latestChat, newSessionId: () => crypto.randomUUID(), openChat, openChatUnder, openInDesktop, received, start, succeeded, transcript };
+  return { deliver, desktopChats, desktopInFront: front, desktopAgeMs, userIdleMs: idle, holders, inDesktop, lastActivity, latestChat, newSessionId: () => crypto.randomUUID(), notify: (note) => notify(note, (why) => log(`уведомление не показано (terminal-notifier): ${why}`)), openChat, openChatUnder, openInDesktop, received, seed, transcript };
 }
 
 module.exports = {

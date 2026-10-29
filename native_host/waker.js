@@ -3,8 +3,8 @@
 // Последним писал клиент, и это ещё не разобрано — побудка уходит в чат заказа
 // Claude Desktop: открытому чату — сразу в его сокет, спящему или архивному — через
 // чат-диспетчер (dispatcher/CLAUDE.md: он передаёт её средствами самого Desktop, окно
-// не переключается). Чата в Desktop ещё нет — агент работает в новом чате `claude -p`,
-// и чат появляется в Desktop, когда пользователь не в его окне. Дошло ли — по метке
+// не переключается). Чата в Desktop ещё нет — мост заводит пустой чат и показывает его в
+// Desktop (агента в фоне не запускаем), побудка доходит туда. Дошло ли — по метке
 // побудки в журнале чата; не дошло — повтор. Состояние выводится из переписки на
 // диске, поэтому сбой доставки или самого моста побудку не теряет.
 
@@ -32,12 +32,13 @@ const ORDER_FILES = ['CLAUDE.md', 'AGENTS.md', 'ROADMAP.md', 'README.md', 'STATE
 const ORDER_FILE_BYTES = 40 * 1024;
 const INBOX_LINK = /kwork\.ru\/(?:new_)?inbox\/([A-Za-z0-9_.-]{2,40})/gi;
 const PROJECT_ROOT = path.resolve(__dirname, '..');
-const RUNS_DIR = 'wake-runs';
 // Агент пересылает побудку в другой заказ клиента — только пока она свежая; помнятся последние доставки.
 const REROUTE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DELIVERED_KEEP = 10;
-// Агент заказа ещё работает в своём `claude -p` — проверить снова через столько.
-const BUSY_RECHECK_MS = 5000;
+// Ссылка resume ушла, а чата в списке Desktop нет — повторить через столько, не больше SHOW_LIMIT ссылок:
+// каждая выводит окно Desktop вперёд.
+const SHOW_RETRY_MS = 2 * 60 * 1000;
+const SHOW_LIMIT = 3;
 // Побудка ушла — метка в журнале чата ждётся столько: сокет пишет сразу, диспетчеру нужен ход
 // модели и запуск спящего чата. Пока чат или диспетчер заняты работой, сообщение стоит в их очереди —
 // срок считается от последнего раза, когда их видели занятыми.
@@ -176,7 +177,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       handled: state.handled || {},
       eventMarks: state.eventMarks || {},
       pending: state.pending || {},
-      // Чат агента по ключу маршрута: { sessionId, dir, nick, startedAt, imported, pid?, wakeId?, logFrom? }.
+      // Чат агента по ключу маршрута: { sessionId, dir, nick, startedAt, shownAt?, shows?, gaveUp?, notifiedAt? }.
       chats: state.chats || {},
       // Отметки «ждём клиента» по ключу маршрута: { until, at }.
       snoozed: state.snoozed || {},
@@ -380,29 +381,11 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
     });
   }
 
-  const runLog = (sessionId) => path.join(serviceDir, RUNS_DIR, `${sessionId}.log`);
-
   // Отметка «ждём клиента» снимается любым разобранным действием по маршруту.
   function release(state, key) {
     const had = Boolean(state.snoozed[key]);
     delete state.snoozed[key];
     return had ? ', отметка «ждём клиента» снята' : '';
-  }
-
-  // Запуск `claude -p` закончился. Агент не создал чат или кончил без удачного итога (лимит, ошибка
-  // API, обрыв) — только запись в лог. Чат, который уже есть в списке Desktop, показывать не нужно.
-  function endRun(chat) {
-    chat.pid = null;
-    const file = runner.transcript(chat.dir, chat.sessionId);
-    if (chat.wakeId && !file) {
-      log(`агент заказа ${path.basename(chat.dir)} не запустился, лог: ${runLog(chat.sessionId)}`);
-    } else if (chat.wakeId && !runner.succeeded(runLog(chat.sessionId), chat.logFrom || 0)) {
-      log(`агент не ответил на побудку ${chat.nick} (лимит или ошибка), лог: ${runLog(chat.sessionId)}`);
-    }
-
-    // Каждый раз заново: пользователь мог убрать показанный чат в архив или удалить его.
-    if (file) chat.imported = runner.desktopChats().get(chat.sessionId)?.archived === false;
-    chat.wakeId = null;
   }
 
   // Диспетчер из data/dispatcher.json: { localId, sessionId, cwd } по метаданным Desktop или null.
@@ -577,15 +560,18 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
 
     const route = routeFor(slug, state);
     const chat = state.chats[route.key];
-    if (chat?.pid && !runner.isRunning(chat.pid, chat.sessionId)) endRun(chat);
     const nick = record.key || slug;
     const desktop = runner.desktopChats();
 
     // Чат заказа один: наш прошлый, а у заказа без него — самый свежий чат Desktop его папки, в том числе
-    // чат пользователя. Корень Kwork общий для всех клиентов без заказа и прочей работы — там только
-    // свой чат клиента. Чаты вне Desktop (T3, терминал) не берутся.
-    const sessionId = chat?.sessionId || (route.order ? runner.latestChat(route.dir, (id) => desktop.has(id))?.sessionId : null) || null;
-    const file = runner.transcript(route.dir, sessionId);
+    // чат пользователя, иначе чат Desktop с названием заказа в другой папке Kwork: заказ заводят и из чата
+    // в корне Kwork, и пользователь работает в нём (29.10.2026). Корень Kwork общий для всех клиентов без
+    // заказа и прочей работы — там только свой чат клиента. Чаты вне Desktop (T3, терминал) не берутся.
+    let sessionId = chat?.sessionId || (route.order ? runner.latestChat(route.dir, (id) => desktop.has(id))?.sessionId : null) || null;
+    let dir = chat?.dir || route.dir;
+    const named = !sessionId && route.order ? namedChat(desktop, route.order.name) : null;
+    if (named) [sessionId, dir] = named;
+    const file = runner.transcript(dir, sessionId);
 
     // Своё сообщение или свои опции без чата клиента — новый чат ради них не заводится:
     // агенту, который ведёт клиента, нечего поправлять. Оплата или отказ клиента
@@ -594,14 +580,6 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
     if (!clientActed && !file) {
       settle(state, slug, news);
       log(`побудка ${slug}: своё действие, чата клиента нет — пропущено`);
-      return;
-    }
-
-    // Агент ещё работает в своём `claude -p`: второй запуск не пускаем, сообщения дойдут после его конца.
-    if (chat?.pid) {
-      item.nextAt = now() + BUSY_RECHECK_MS;
-      if (!item.busy) log(`побудка ${slug}: агент заказа ещё работает — после его конца`);
-      item.busy = true;
       return;
     }
 
@@ -626,7 +604,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
     if (open) {
       try {
         await send(item, { via: 'socket', sessionId: open.sessionId, dir: open.cwd, routeKey: route.key }, news, () => runner.deliver(open, text));
-        state.chats[route.key] = { sessionId: open.sessionId, dir: route.dir, nick, startedAt: now(), imported: true };
+        state.chats[route.key] = { sessionId: open.sessionId, dir: open.cwd, nick, startedAt: now() };
         log(`побудка ${slug}: ${news.reason}, в чат, открытый в Desktop`);
         return;
       } catch (error) {
@@ -670,35 +648,68 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
         return;
       }
 
-      await send(item, { via: 'dispatcher', sessionId, dir: route.dir, routeKey: route.key, dispatcher: { sessionId: info.sessionId, cwd: info.cwd } }, news, () => runner.deliver(dispatcher, dispatchText(item, target, text)));
-      state.chats[route.key] = { sessionId, dir: route.dir, nick, startedAt: now(), imported: true };
+      await send(item, { via: 'dispatcher', sessionId, dir, routeKey: route.key, dispatcher: { sessionId: info.sessionId, cwd: info.cwd } }, news, () => runner.deliver(dispatcher, dispatchText(item, target, text)));
+      state.chats[route.key] = { sessionId, dir, nick, startedAt: now() };
       log(`побудка ${slug}: ${news.reason}, через диспетчера${target.archived ? ' (чат в архиве)' : ''}${route.reason ? ` (${route.reason})` : ''}`);
       return;
     }
 
-    // Чата в Desktop нет: создать его оттуда Desktop не даёт без пользователя. Агент работает сразу
-    // в новом чате `claude -p` (или в нашем ещё не показанном), а в Desktop чат появится после
-    // запуска, когда пользователь не в окне Desktop (finishRuns).
-    const resume = Boolean(file);
-    const runId = resume ? sessionId : runner.newSessionId();
-    const name = resume ? undefined : route.order?.name || nick;
-    const { pid, logFrom } = runner.start({ dir: route.dir, text, sessionId: runId, resume, name, logFile: runLog(runId) });
-    state.chats[route.key] = {
-      sessionId: runId,
-      dir: route.dir,
-      nick,
-      pid,
-      startedAt: now(),
-      wakeId: item.wakeId,
-      // С какого места лога запуска искать его итог: лог дописывается при каждом запуске чата.
-      logFrom,
-      imported: false,
+    // Чата в Desktop нет. Создать его оттуда Desktop не даёт, а агента в фоне не запускаем (решение
+    // пользователя 29.10.2026): мост заводит пустой чат, добавляет его в список Desktop, и побудка
+    // доходит туда обычным путём на следующих тактах.
+    if (!file) {
+      const name = route.order?.name || nick;
+      const id = runner.newSessionId();
+      runner.seed({ dir: route.dir, sessionId: id, name, at: now(), text: `Чат клиента ${nick} на Kwork${route.order ? ` (заказ ${route.order.name})` : ''}. Сюда приходят побудки моста, правила — ${rulesPath}.` });
+      state.chats[route.key] = { sessionId: id, dir: route.dir, nick, startedAt: now() };
+      writeAtomic(statePath, state);
+      log(`побудка ${slug}: ${news.reason}, новый чат «${name}»${route.reason ? ` (${route.reason})` : ''}`);
+    }
+
+    showChat(state, slug, state.chats[route.key]);
+    item.nextAt = now() + CONFIRM_RECHECK_MS;
+  }
+
+  // Чат Desktop с названием заказа в папке Kwork: [номер CLI, папка] или null; не из архива — первым.
+  function namedChat(desktop, name) {
+    let root = kworkRoot;
+    try {
+      root = fs.realpathSync(kworkRoot);
+    } catch {
+      // Папки нет — сравниваем как есть.
+    }
+
+    const inside = (cwd) => [kworkRoot, root].some((base) => cwd === base || cwd.startsWith(`${base}/`));
+    // Из одноимённых — самый свежий журнал.
+    const fresh = ([id, item]) => runner.transcript(item.cwd, id)?.mtimeMs || 0;
+    const found = [...desktop].filter(([, item]) => item.title === name && item.cwd && inside(item.cwd)).sort((left, right) => fresh(right) - fresh(left));
+    const [id, item] = found.find(([, entry]) => !entry.archived) || found[0] || [];
+    return id ? [id, item.cwd] : null;
+  }
+
+  // Показ чата в Desktop ссылкой resume: Desktop добавляет его в список и переключает окно на него. Пока
+  // пользователь работает в Desktop, окно не трогаем — одно уведомление, по нажатию та же ссылка; ушёл из
+  // Desktop или отошёл от компьютера — показ сам. Desktop не взял чат — повтор через SHOW_RETRY_MS, после
+  // SHOW_LIMIT ссылок — только уведомление: побудка ждёт, пока пользователь откроет чат сам.
+  function showChat(state, slug, chat) {
+    if (now() - (chat.shownAt || 0) < SHOW_RETRY_MS) return;
+    const notify = (why) => {
+      if (chat.notifiedAt) return;
+      chat.notifiedAt = now();
+      runner.notify({ title: `Kwork: новый чат ${chat.nick}`, message: 'Клиент написал — нажмите, чтобы открыть чат в Claude', url: `claude://resume?session=${chat.sessionId}`, group: `kph-${chat.sessionId}` });
+      log(`побудка ${slug}: ${why} — уведомление`);
     };
-    const released = release(state, route.key);
-    settle(state, slug, news, { wakeId: item.wakeId, key: route.key });
-    // Сразу на диск: упади мост после запуска — второй запуск в тот же чат не пойдёт.
-    writeAtomic(statePath, state);
-    log(`побудка ${slug}: ${news.reason}, ${resume ? 'агент в своём чате (ещё не в Desktop)' : 'новый чат'}${route.reason ? ` (${route.reason})` : ''}${released}`);
+    if (runner.desktopInFront() && runner.userIdleMs() < USER_AWAY_MS) return notify('чат ещё не в Desktop, вы в нём');
+    if ((chat.shows || 0) >= SHOW_LIMIT) {
+      // Запись о лимите — одна и отдельно от уведомления: оно могло уйти раньше, пока пользователь был в Desktop.
+      if (!chat.gaveUp) log(`побудка ${slug}: Desktop не взял чат ${chat.sessionId} после ${SHOW_LIMIT} ссылок — ждём, пока вы откроете его`);
+      chat.gaveUp = true;
+      return notify('чат не в Desktop');
+    }
+    chat.shows = (chat.shows || 0) + 1;
+    chat.shownAt = now();
+    runner.openInDesktop(chat.sessionId);
+    log(`побудка ${slug}: ссылка на чат отправлена в Desktop`);
   }
 
   async function wakeDue(state) {
@@ -719,34 +730,6 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       } catch (error) {
         fail(state, slug, item, error);
       }
-    }
-  }
-
-  // Запуск закончился (pid мёртв) — чат, которого ещё нет в списке Claude Desktop, один раз
-  // добавляется туда ссылкой resume, но не раньше, чем по маршруту кончатся запуск и ожидающие
-  // побудки, и не пока пользователь в Desktop: ссылка переключает окно Desktop на этот чат.
-  function finishRuns(state) {
-    let waiting = null;
-    let front = null;
-    for (const [key, chat] of Object.entries(state.chats)) {
-      if (chat.pid) {
-        if (runner.isRunning(chat.pid, chat.sessionId)) continue;
-        endRun(chat);
-      }
-
-      if (chat.imported) continue;
-      // Журнала нет (запуск сорвался): показывать в Desktop нечего.
-      if (!runner.transcript(chat.dir, chat.sessionId)) {
-        delete state.chats[key];
-        continue;
-      }
-
-      waiting ??= new Set(Object.keys(state.pending).map((slug) => routeFor(slug, state).key));
-      if (waiting.has(key)) continue;
-      front ??= runner.desktopInFront();
-      if (front) continue;
-      runner.openInDesktop(chat.sessionId);
-      chat.imported = true;
     }
   }
 
@@ -860,11 +843,10 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
 
       await wakeDue(state);
       try {
-        finishRuns(state);
         await keepDispatcher(state);
         cleanWakeTexts();
       } catch (error) {
-        log(`запуски агентов и диспетчер не проверены: ${error?.message || error}`);
+        log(`диспетчер не проверен: ${error?.message || error}`);
       }
 
       writeAtomic(statePath, state);

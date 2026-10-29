@@ -47,13 +47,22 @@ function createWorld() {
   fs.writeFileSync(path.join(kworkRoot, 'docs', 'заказы-клиенты.md'), '- shop: ivan\n');
   const save = (messages) => handleCommand(targetDir, { command: 'save-dialog', dialog: { key: 'ivan', clientId: '501', messages } });
   const claude = createFakeClaude({ home, now: () => clock });
-  // Пользователь в Desktop — чат заказа в список Desktop не попадает, побудки идут фоновым агентом.
-  claude.front = true;
+  // Чат заказа открыт в Desktop: побудки приходят в его сокет.
+  claude.say(orderDir, 'shop-chat', clock - HOUR);
+  claude.addToDesktop('shop-chat', { cwd: orderDir });
+  claude.openDesktopChat(orderDir, 'shop-chat');
   const logs = [];
   const waker = createWaker({ targetDir, kworkRoot, runner: claude.runner, log: (line) => logs.push(line), now: () => clock });
+  // Такт моста, приём сокетом и подтверждение по метке в журнале чата (через 2 с).
+  const tick = async () => {
+    await waker.tick();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    clock += 2000;
+    await waker.tick();
+  };
   const serviceDir = path.join(targetDir, 'data');
   const stateOf = () => JSON.parse(fs.readFileSync(path.join(serviceDir, 'wake-state.json'), 'utf8'));
-  return { save, claude, runs: claude.runs, waker, logs, serviceDir, orderDir, stateOf, advance: (ms) => { clock += ms; }, now: () => clock };
+  return { save, claude, waker, tick, logs, serviceDir, orderDir, stateOf, advance: (ms) => { clock += ms; }, now: () => clock };
 }
 
 // Клиент написал, агент разбужен и отметил «ждём клиента» на сутки.
@@ -62,8 +71,8 @@ async function worldWaitingForClient() {
   world.save([message(1, 0, 'me', 'жду')]);
   await world.waker.tick();
   world.save([message(1, 0, 'me', 'жду'), message(2, 1, 'client', 'вопрос')]);
-  await world.waker.tick();
-  assert.equal(world.runs.length, 1);
+  await world.tick();
+  assert.equal(world.claude.inbox.length, 1);
   world.advance(60 * 1000);
   snooze.writeRequest(world.serviceDir, { key: world.orderDir, until: world.now() + 24 * HOUR, at: world.now() });
   await world.waker.tick();
@@ -74,7 +83,7 @@ test('заявка агента переезжает в состояние бу�
   const world = await worldWaitingForClient();
   assert.deepEqual(world.stateOf().snoozed[world.orderDir], { until: world.now() + 24 * HOUR, at: world.now() });
   assert.deepEqual(snooze.listRequests(world.serviceDir), []);
-  assert.equal(world.runs.length, 1);
+  assert.equal(world.claude.inbox.length, 1);
 
   // Срок вышел — отметка уходит сама.
   world.advance(25 * HOUR);
@@ -89,9 +98,9 @@ test('заявка, оставленная до нового запуска аг
   const at = world.now();
   world.advance(60 * 1000);
   world.save([message(1, 0, 'me', 'жду'), message(2, 1, 'client', 'вопрос')]);
-  await world.waker.tick();
-  assert.equal(world.runs.length, 1);
-  // Заявка датирована раньше запуска, который уже идёт: клиент успел ответить.
+  await world.tick();
+  assert.equal(world.claude.inbox.length, 1);
+  // Заявка датирована раньше последней побудки: клиент успел ответить.
   snooze.writeRequest(world.serviceDir, { key: world.orderDir, until: world.now() + 24 * HOUR, at });
   await world.waker.tick();
   assert.deepEqual(world.stateOf().snoozed, {});
@@ -102,23 +111,24 @@ test('клиент ответил по отмеченному маршруту �
   const world = await worldWaitingForClient();
   world.advance(2 * HOUR);
   world.save([message(1, 0, 'me', 'жду'), message(2, 1, 'client', 'вопрос'), message(3, 30, 'client', 'ок, посмотрю вечером')]);
-  await world.waker.tick();
-  assert.equal(world.runs.length, 2);
-  assert.deepEqual(world.runs[1].args.slice(0, 3), ['-p', '--resume', world.runs[0].sessionId]);
-  assert.match(world.runs[1].text, /ок, посмотрю вечером/);
+  await world.tick();
+  assert.equal(world.claude.inbox.length, 2);
+  assert.equal(world.claude.inbox[1].sessionId, 'shop-chat');
+  assert.match(world.claude.inbox[1].user.message.content, /ок, посмотрю вечером/);
   assert.ok(world.logs.some((line) => /отметка «ждём клиента» снята/.test(line)));
   assert.deepEqual(world.stateOf().snoozed, {});
 });
 
-test('чат держит терминал, а клиент ответил по отмеченному маршруту — агент не запущен, отметка снята', async () => {
+test('чат держит терминал, а клиент ответил по отмеченному маршруту — побудка пропущена, отметка снята', async () => {
   const world = await worldWaitingForClient();
-  // Пользователь продолжил чат в терминале и написал в нём уже после нашего запуска.
-  world.claude.holdInTerminal(world.runs[0].sessionId);
+  // Пользователь закрыл чат в Desktop, продолжил его в терминале и написал там уже после побудки.
+  world.claude.closeDesktopChats();
+  world.claude.holdInTerminal('shop-chat');
   world.advance(5 * 60 * 1000);
-  world.claude.say(world.orderDir, world.runs[0].sessionId, world.now() - 60 * 1000);
+  world.claude.say(world.orderDir, 'shop-chat', world.now() - 60 * 1000);
   world.save([message(1, 0, 'me', 'жду'), message(2, 1, 'client', 'вопрос'), message(3, 3, 'client', 'ок, посмотрю вечером')]);
   await world.waker.tick();
-  assert.equal(world.runs.length, 1);
+  assert.equal(world.claude.inbox.length, 1);
   assert.ok(world.logs.some((line) => /занят процессом вне Desktop — пропущено, отметка «ждём клиента» снята/.test(line)));
   assert.deepEqual(world.stateOf().snoozed, {});
 });
