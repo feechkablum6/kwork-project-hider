@@ -29,7 +29,8 @@ const reply = require('../src/reply-core.js');
 const MESSAGE_MARKER = /^(?:[^:\n]{0,30}\s)?(?:текст[а-яё]*|сообщени[а-яё]*|ответ[а-яё]*|черновик[а-яё]*|предлагаю ответить)(?:\s[^:\n]{0,40})?\s(?:для\sклиента|клиенту)(?:[\s,][^:\n]{0,50})?:\s*(.*)$/i;
 const MARKER_START = /^(?:текст|сообщени|ответ|черновик)/i;
 const OFFER_MARKER = /^Название заказа\s*:\s*(.+)$/i;
-const PRICE_LINE = /^Цена\s*:.*(?:₽|руб)/i;
+// «1 500 Р» — буквой вместо знака рубля (просьба пользователя 02.11.2026).
+const PRICE_LINE = /^Цена\s*:.*(?:₽|руб|\dр(?![а-яёa-z])|\d\s+р(?![а-яёa-z]))/i;
 const TERM_LINE = /^Срок\s*:/i;
 const PROJECT_LINK = /kwork\.ru\/projects\/(\d+)/g;
 const BODY_LIMIT = 4000;
@@ -47,6 +48,18 @@ function stripDecoration(line) {
 
 function isFence(line) {
   return /^\s*(```|~~~)/.test(line);
+}
+
+// Строки вне блоков кода и цитат: «Цена:» там — пересказ, а не своя оценка.
+function plainLines(lines) {
+  let inCode = false;
+  return lines.filter((line) => {
+    if (isFence(line)) {
+      inCode = !inCode;
+      return false;
+    }
+    return !inCode && !/^\s*(?:>|&gt;)/.test(line);
+  });
 }
 
 function isBoundary(line) {
@@ -109,8 +122,8 @@ function readBlock(lines, start, inFence) {
 }
 
 export function extractPrices(text) {
-  return [...String(text || '').matchAll(/(\d{1,3}(?:[  ]\d{3})+|\d+)(?:[.,]\d+)?\s*(?:₽|руб|р\.|[рР](?![а-яёa-z]))/g)]
-    .map((match) => Number(match[1].replace(/[  ]/g, '')))
+  return [...String(text || '').matchAll(/(\d{1,3}(?:[  \u202f]\d{3})+|\d+)(?:[.,]\d+)?\s*(?:₽|руб|р\.|[рР](?![а-яёa-z]))/g)]
+    .map((match) => Number(match[1].replace(/[  \u202f]/g, '')))
     .filter((value) => value >= 100);
 }
 
@@ -196,20 +209,25 @@ export function extractDrafts(text) {
   }
 
   if (!hasOffer) {
-    const priceLine = lines.find((line) => PRICE_LINE.test(stripDecoration(line)));
     const termLine = lines.find((line) => TERM_LINE.test(stripDecoration(line)));
+    // Срок клиенту можно не называть (02.11.2026): цена без «Срок:» — тоже оценка, но только своя
+    // строка с числом вне цитат и кода.
+    const priceLine = termLine
+      ? lines.find((line) => PRICE_LINE.test(stripDecoration(line)))
+      : plainLines(lines).find((line) => PRICE_LINE.test(stripDecoration(line)) && extractPrices(line).length > 0);
     // Цена и срок рядом с сообщением клиенту — та же оценка, а не вторая:
     // числа уходят в сообщение, отдельного черновика цены нет.
     const message = drafts.find((draft) => draft.kind === 'message');
-    if (priceLine && termLine && message) {
+    if (priceLine && message) {
       message.prices = extractPrices(priceLine).slice(0, 1);
-      message.terms = lineTerms(termLine);
-    } else if (priceLine && termLine) {
+      // Без «Срок:» срок берётся из текста сообщения, как и до строки цены.
+      if (termLine) message.terms = lineTerms(termLine);
+    } else if (priceLine) {
       drafts.push({
         kind: 'price',
-        body: `${stripDecoration(priceLine)}\n${stripDecoration(termLine)}`,
+        body: termLine ? `${stripDecoration(priceLine)}\n${stripDecoration(termLine)}` : stripDecoration(priceLine),
         prices: extractPrices(priceLine).slice(0, 1),
-        terms: lineTerms(termLine),
+        terms: termLine ? lineTerms(termLine) : [],
       });
     }
   }

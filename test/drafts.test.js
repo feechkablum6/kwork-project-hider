@@ -67,6 +67,33 @@ test('отклик и цена со сроком распознаются отд
   assert.deepEqual(price.map((item) => [item.kind, item.prices, item.terms]), [['price', [4500], [2]]]);
 });
 
+test('цена с буквой Р и без срока распознаётся (просьба пользователя 02.11.2026)', async () => {
+  const { extractDrafts } = await load();
+
+  const price = extractDrafts('Оценка:\nЦена: 1 500 Р');
+  assert.deepEqual(price.map((item) => [item.kind, item.prices, item.terms]), [['price', [1500], []]]);
+
+  const message = extractDrafts('Сообщение клиенту:\n```\n1 500 Р. Начинать?\n```\nЦена: 1 500 Р');
+  assert.deepEqual(message.map((item) => [item.kind, item.prices]), [['message', [1500]]]);
+});
+
+test('цена без срока: срок и цена из текста сообщения не теряются, цитаты и код не в счёт', async () => {
+  const { extractDrafts } = await load();
+
+  const withTerm = extractDrafts('Сообщение клиенту:\n```\nСделаю за 3 дня.\n```\nЦена: 5 000 Р');
+  assert.deepEqual(withTerm.map((item) => [item.kind, item.prices, item.terms]), [['message', [5000], [3]]]);
+
+  const thousands = extractDrafts('Сообщение клиенту:\n```\nСделаю за 3 дня, 5 000 ₽.\n```\nЦена: 5 тыс. ₽');
+  assert.deepEqual(thousands.map((item) => [item.prices, item.terms]), [[[5000], [3]]]);
+
+  assert.deepEqual(extractDrafts('Клиент писал:\n> Цена: 2 000 ₽ меня устраивает'), []);
+  assert.deepEqual(extractDrafts('Пример:\n```\nЦена: 2 000 Р\n```'), []);
+  assert.deepEqual(extractDrafts('Цена: 5 тыс. ₽'), []);
+
+  const narrow = extractDrafts('Цена: 1\u202f500\u202fР');
+  assert.deepEqual(narrow.map((item) => item.prices), [[1500]]);
+});
+
 test('последний ход берётся после настоящего сообщения пользователя', async () => {
   const { readLastTurn } = await load();
   const lines = [
