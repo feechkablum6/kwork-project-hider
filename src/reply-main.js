@@ -4,8 +4,8 @@
 //
 // Ничего не отправляет. Кнопки «Отправить», «Предложить», «Предложить услуги»,
 // «Сдать работу», клавиши и submit формы здесь не трогаются никогда: нажимает их
-// только пользователь. Нажатия — только через safeClick по списку SAFE_CLICKS,
-// контракт держит test/reply-panel.test.js.
+// только пользователь. Нажатия — только через clickSafely: кнопки из списка SAFE_CLICKS
+// и ссылка «Загрузить ещё» в списке сообщений заказа; контракт держит test/reply-panel.test.js.
 (function initKworkReplyMain() {
   'use strict';
 
@@ -37,7 +37,10 @@
 
   function safeClick(name) {
     const selector = SAFE_CLICKS[name];
-    const element = selector ? document.querySelector(selector) : null;
+    return clickSafely(selector ? document.querySelector(selector) : null);
+  }
+
+  function clickSafely(element) {
     if (!element) {
       return false;
     }
@@ -142,6 +145,29 @@
 
     const props = block ? blockProps(block) : null;
     return props ? { block, ...props } : null;
+  }
+
+  // На странице заказа видны последние 10 сообщений, старые догружает ссылка «Загрузить ещё»
+  // под списком (02.11.2026: письмо клиента четырьмя часами раньше уже не видно, и часть
+  // вставлялась без «Ответить»). Ссылка только догружает историю, как нажал бы пользователь.
+  function loadMoreLink() {
+    const list = trackList()?.$el;
+    return list ? [...list.querySelectorAll('a')].find((link) => link.textContent.trim() === 'Загрузить ещё' && visible(link)) || null : null;
+  }
+
+  async function findMessageLoading(wanted) {
+    let found = findMessage(wanted);
+    if (!wanted.key && !wanted.target) return found;
+    for (let round = 0; !found && isTrack && round < 5; round += 1) {
+      const before = document.querySelectorAll('.js-message-block').length;
+      if (!clickSafely(loadMoreLink())) break;
+      if (!await waitFor(() => document.querySelectorAll('.js-message-block').length > before, 3000)) break;
+      // Ключ «автор:время» ticks-main.js ставит догруженным блокам через 300 мс: по ключу точнее, чем по тексту.
+      await wait(400);
+      found = findMessage(wanted);
+    }
+
+    return found;
   }
 
   function quoteSet() {
@@ -358,7 +384,14 @@
     let note = null;
     let applied = mode;
     if (mode === 'reply' || mode === 'quote') {
-      const found = findMessage({ key, target });
+      // Догрузка истории — только по кнопке: автоподмена не листает переписку за пользователя.
+      const fieldBefore = editorText();
+      const found = onlyIf ? findMessage({ key, target }) : await findMessageLoading({ key, target });
+      // Пока шла догрузка (до 15 с), пользователь мог начать печатать: его текст не затираем.
+      if (!sameText(editorText(), fieldBefore)) {
+        return { ok: false, busy: true, error: 'Пока догружалась переписка, текст в поле изменился. Нажмите ещё раз, чтобы заменить его частью черновика' };
+      }
+
       if (!found) {
         clearQuote();
         applied = 'plain';

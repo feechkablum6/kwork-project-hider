@@ -239,3 +239,22 @@ test('по кнопке текст печатается по знаку и Kwork
   assert.match(main, /kind: 'typed'/);
   assert.match(content, /kind !== 'typed'/);
 });
+
+test('на странице заказа «Ответить» на старое сообщение догружает историю ссылкой «Загрузить ещё», а не вставляет текст без ответа', () => {
+  const main = code('reply-main.js');
+  assert.match(main, /const found = onlyIf \? findMessage\(\{ key, target \}\) : await findMessageLoading\(\{ key, target \}\)/);
+  assert.match(main, /const list = trackList\(\)\?\.\$el;[\s\S]*link\.textContent\.trim\(\) === 'Загрузить ещё'/);
+  // Текст поля поменялся за время догрузки — не затирать, а попросить второе нажатие.
+  assert.match(main, /if \(!sameText\(editorText\(\), fieldBefore\)\) \{\s*return \{ ok: false, busy: true/);
+  // Нажатия — только из safeClick и догрузки истории.
+  assert.equal([...main.matchAll(/clickSafely\(/g)].length, 3, 'clickSafely: объявление, safeClick, findMessageLoading');
+  // Ответ страницы записывается за той частью, что ушла командой, а не за пришедшей позже.
+  assert.match(code('reply-content.js'), /pending = \{ requestId, n: part\.n, auto: Boolean\(onlyIf\), draft, part \};/);
+  assert.match(code('reply-content.js'), /const \{ draft, part, auto \} = pending;/);
+  assert.match(main, /if \(!wanted\.key && !wanted\.target\) return found;/);
+  assert.match(main, /await wait\(400\);\s*found = findMessage\(wanted\);/);
+  // Догрузка только на странице заказа и с ограничением кругов; клик идёт через тот же замок, что и SAFE_CLICKS.
+  assert.match(main, /!found && isTrack && round < 5/);
+  assert.match(main, /if \(!clickSafely\(loadMoreLink\(\)\)\) break;/);
+  assert.match(main, /function safeClick\(name\) \{\s*const selector = SAFE_CLICKS\[name\];\s*return clickSafely\(/);
+});

@@ -515,7 +515,9 @@
     const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const forced = Boolean(force && force.draftId === draft.id && force.n === part.n && Date.now() < force.until);
     const last = lastInserted();
-    pending = { requestId, n: part.n, auto: Boolean(onlyIf) };
+    // Черновик и часть на момент нажатия: пока страница готовит поле (догрузка до 15 с), агент
+    // может прислать новый, а вставлен будет текст из этой команды.
+    pending = { requestId, n: part.n, auto: Boolean(onlyIf), draft, part };
     status = { text: '', tone: '' };
     render();
     window.postMessage({
@@ -534,13 +536,14 @@
       known: [...draft.parts.filter((item) => ['reply', 'quote', 'plain'].includes(item.mode)).map((item) => item.text), ...(last ? [last.text] : [])],
       onlyIf,
     }, window.location.origin);
-    // Ответа нет — страница сменилась или Kwork завис: кнопка не залипает.
+    // Ответа нет — страница сменилась или Kwork завис: кнопка не залипает. Запас — на догрузку
+    // старых сообщений «Загрузить ещё» на странице заказа (до 5 кругов по 3 с).
     setTimeout(() => {
       if (pending?.requestId === requestId) {
         pending = null;
         setStatus('Kwork не ответил. Обновите страницу и попробуйте ещё раз', 'warn');
       }
-    }, 8000);
+    }, 20000);
   }
 
   // Агент прислал новый черновик. В поле ещё текст, который панель вставила из
@@ -577,9 +580,7 @@
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.data?.source !== RESULT_SOURCE || event.data.kind !== 'prepared') return;
     if (event.data.requestId !== pending?.requestId) return;
-    const draft = currentDraft();
-    const part = draft?.parts.find((item) => item.n === pending.n);
-    const auto = pending.auto;
+    const { draft, part, auto } = pending;
     pending = null;
     // В поле уже не тот текст, что вставляла панель: его не трогаем.
     if (event.data.quiet) {
@@ -588,7 +589,8 @@
     }
 
     if (event.data.busy) {
-      force = part ? { draftId: draft.id, n: part.n, until: Date.now() + FORCE_WINDOW_MS } : null;
+      // Пока страница готовила поле, мог прийти новый черновик: второе нажатие пойдёт уже по нему.
+      force = part ? { draftId: currentDraft()?.id || draft.id, n: part.n, until: Date.now() + FORCE_WINDOW_MS } : null;
       setStatus(event.data.error, 'warn');
       return;
     }
