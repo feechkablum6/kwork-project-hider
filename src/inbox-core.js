@@ -1098,6 +1098,12 @@
     return error?.status !== undefined ? isFatalHistoryError(error) : error instanceof TypeError;
   }
 
+  // Пауза автосохранения после отказа биржи: первый отказ — 2 минуты (10 минут
+  // прятали сообщения клиента, 04.11.2026), каждый следующий подряд — вдвое дольше, до 10.
+  function syncPauseMs(streak) {
+    return Math.min(10 * 60 * 1000, 2 * 60 * 1000 * 2 ** Math.max(0, Number(streak) || 0));
+  }
+
   // История приходит пачками, а параметр глубины Kwork не публикует: рабочий
   // вариант ищется один раз и дальше используется как есть. Запрос внедряется
   // снаружи, поэтому одна реализация служит и вкладке Kwork, и фоновому скрипту.
@@ -1676,6 +1682,7 @@
     loadDialogHistory,
     isFatalHistoryError,
     isKworkRefusal,
+    syncPauseMs,
     looksLikeMessage,
     mergeMessages,
     needsFullHistory,

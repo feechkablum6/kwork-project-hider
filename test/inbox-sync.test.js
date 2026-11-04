@@ -417,6 +417,11 @@ test('отказ биржи — 429, 5xx и обрыв сети; ошибки р
   assert.equal(core.isKworkRefusal(new Error('мост не сохранил переписку')), false);
 });
 
+test('пауза после отказа биржи: 2 минуты, подряд — вдвое дольше, не больше 10', () => {
+  const minutes = (streak) => core.syncPauseMs(streak) / 60000;
+  assert.deepEqual([undefined, 0, 1, 2, 3, 9].map(minutes), [2, 2, 4, 8, 10, 10]);
+});
+
 test('живой канал Kwork: адрес берётся со страницы /inbox, чужой хост не принимается', () => {
   const page = `<script>PullModule.start({\n\t\t\t\t\thost: 'notice.kwork.ru',\n\t\t\t\t\tchannelId: 'cnl_Ab-9_x',\n\t\t\t\t\tuserId: 23848034\n\t\t\t\t});var pullModuleSettings = {\n\t\t\t\t\thost: 'notice.kwork.ru',\n\t\t\t\t\tchannelId: 'cnl_Ab-9_x',\n\t\t\t\t\tuserId: 23848034\n\t\t\t\t};</script>`;
   assert.deepEqual(core.parsePullSettings(page), { url: 'wss://notice.kwork.ru/ws/public/cnl_Ab-9_x' });

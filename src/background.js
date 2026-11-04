@@ -544,7 +544,6 @@ const USER_IDS_KEY = 'inboxUserIds';
 const SYNC_USER_IDS_KEY = 'inboxSyncUserIds';
 const OFFERS_EVERY_MS = 6 * 60 * 1000;
 const FILES_SWEEP_EVERY_MS = 60 * 60 * 1000;
-const SYNC_THROTTLE_PAUSE_MS = 10 * 60 * 1000;
 
 let syncRunning = false;
 // Заявки агентов, которые ждут прохода: ники и номера заявок для ответа мосту.
@@ -1119,7 +1118,8 @@ const { isKworkRefusal } = core;
 
 async function pauseSync() {
   const times = { ...(await storageGet('local', SYNC_TIMES_KEY) || {}) };
-  times.pausedUntil = Date.now() + SYNC_THROTTLE_PAUSE_MS;
+  times.pausedUntil = Date.now() + core.syncPauseMs(times.pauseStreak);
+  times.pauseStreak = (times.pauseStreak || 0) + 1;
   await storageSet('local', { [SYNC_TIMES_KEY]: times });
 }
 
@@ -1397,8 +1397,13 @@ async function syncInbox() {
     }
 
     // Пауза ставится после всех этапов: отказ может прийти и на обходе файлов.
+    const pauseMinutes = Math.round(core.syncPauseMs(times.pauseStreak) / 60000);
     if (syncStopped) {
-      times.pausedUntil = now + SYNC_THROTTLE_PAUSE_MS;
+      // От конца прохода, а не от `now`: долгий проход иначе ставит паузу в прошлое.
+      times.pausedUntil = Date.now() + core.syncPauseMs(times.pauseStreak);
+      times.pauseStreak = (times.pauseStreak || 0) + 1;
+    } else {
+      times.pauseStreak = 0;
     }
 
     await storageSet('local', { [SYNC_TIMES_KEY]: times, [SYNC_FILE_RETRY_KEY]: fileRetries });
@@ -1411,7 +1416,7 @@ async function syncInbox() {
     const heldKeys = held.map((item) => item.key.toLowerCase());
     await reportSync({
       ok: pendingKeys.length === 0 && !syncStopped,
-      error: syncStopped ? 'Kwork попросил подождать, пауза 10 минут' : pendingKeys.length > 0 ? `не дочитаны: ${pendingKeys.join(', ')}` : null,
+      error: syncStopped ? `Kwork попросил подождать, пауза ${pauseMinutes} мин` : pendingKeys.length > 0 ? `не дочитаны: ${pendingKeys.join(', ')}` : null,
       held: heldKeys,
       dialogs: chatList.length,
       changed: savedKeys,
