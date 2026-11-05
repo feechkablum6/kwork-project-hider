@@ -240,10 +240,12 @@ test('по кнопке текст печатается по знаку и Kwork
   assert.match(content, /kind !== 'typed'/);
 });
 
-test('на странице заказа «Ответить» на старое сообщение догружает историю ссылкой «Загрузить ещё», а не вставляет текст без ответа', () => {
+test('на странице заказа «Ответить» на старое сообщение догружает историю ссылкой «Показать все» или «Загрузить ещё», а не вставляет текст без ответа', () => {
   const main = code('reply-main.js');
   assert.match(main, /const found = onlyIf \? findMessage\(\{ key, target \}\) : await findMessageLoading\(\{ key, target \}\)/);
-  assert.match(main, /const list = trackList\(\)\?\.\$el;[\s\S]*link\.textContent\.trim\(\) === 'Загрузить ещё'/);
+  // 05.11.2026 под 10 последними сообщениями заказа стояла «Показать все», а не «Загрузить ещё».
+  assert.match(main, /const LOAD_MORE = \['Показать все', 'Загрузить ещё'\];/);
+  assert.match(main, /const list = trackList\(\)\?\.\$el;[\s\S]*LOAD_MORE\.includes\(link\.textContent\.trim\(\)\)/);
   // Текст поля поменялся за время догрузки — не затирать, а попросить второе нажатие.
   assert.match(main, /if \(!sameText\(editorText\(\), fieldBefore\)\) \{\s*return \{ ok: false, busy: true/);
   // Нажатия — только из safeClick и догрузки истории.
@@ -257,4 +259,13 @@ test('на странице заказа «Ответить» на старое 
   assert.match(main, /!found && isTrack && round < 5/);
   assert.match(main, /if \(!clickSafely\(loadMoreLink\(\)\)\) break;/);
   assert.match(main, /function safeClick\(name\) \{\s*const selector = SAFE_CLICKS\[name\];\s*return clickSafely\(/);
+});
+
+test('сообщение клиента для «Ответить» или «Цитировать» не нашлось — поле не трогается, панель предупреждает', () => {
+  const main = code('reply-main.js');
+  const branch = /if \(!found\) \{([\s\S]*?)\n {6}\}/.exec(main)?.[1] || '';
+  assert.match(branch, /return \{\s*ok: false,\s*error: /, 'ненайденная цель — ошибка, а не вставка');
+  assert.doesNotMatch(branch, /applied = 'plain'/, 'часть не превращается в обычное сообщение');
+  // Ошибка уходит в панель предупреждением, часть остаётся текущей.
+  assert.match(code('reply-content.js'), /if \(!event\.data\.ok\) \{\s*setStatus\(event\.data\.error \|\| 'Не получилось подготовить часть', 'warn'\);\s*return;/);
 });

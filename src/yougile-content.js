@@ -264,18 +264,24 @@
     const part = progressOf(draft)?.current;
     if (!draft || !part || pending || !chat) return;
     let targetId = null;
+    let twinAuthor = null;
     if (part.mode === 'reply' || part.mode === 'quote') {
-      const message = part.target ? reply.findTargetMessage(snapshot.messages || [], part.target, {
+      const matches = part.target ? reply.matchingMessages(snapshot.messages || [], part.target, {
         clientId: snapshot.clientId || null,
         dialogKey: snapshot.dialogKey || null,
         selfId: snapshot.selfId || chat.selfId || null,
-      }) : null;
+      }) : [];
+      const message = matches.at(-1);
       if (!message) {
         setStatus('Не нашёл сообщение, на которое отвечает эта часть. Ответьте вручную или пропустите часть', 'warn');
         return;
       }
 
       targetId = message.id;
+      // Такой текст прислали несколько человек: черновик не говорит, кому из них ответ.
+      if (new Set(matches.map((item) => item.authorId || item.authorName)).size > 1) {
+        twinAuthor = message.authorName || 'последнего написавшего';
+      }
     }
 
     const forced = Boolean(force && force.draftId === draft.id && force.n === part.n && Date.now() < force.until);
@@ -294,7 +300,11 @@
     if (result?.ok) {
       inserted[chat.id] = part.text;
       force = null;
-      setStatus(`Часть ${part.n} в поле. Проверьте и отправьте сами`, 'ok');
+      if (twinAuthor) {
+        setStatus(`Часть ${part.n} в поле ответом на сообщение «${twinAuthor}»: такой же текст писали несколько человек. Если отвечаете другому, выберите его сообщение сами`, 'warn');
+      } else {
+        setStatus(`Часть ${part.n} в поле. Проверьте и отправьте сами`, 'ok');
+      }
       return;
     }
 
@@ -303,8 +313,10 @@
   }
 
   // Расширение перезапустилось: страница потеряла с ним связь, и чаты больше не сохраняются.
-  // Поле пустое — вкладка обновляется сама (и скрытая, не чаще раза в минуту), иначе ждём отправки.
+  // Поле пустое — вкладка обновляется сама (и скрытая, не чаще раза в минуту), иначе плашка и ждём отправки.
   const RELOAD_KEY = 'kphOrphanReloadAt';
+  let notice = null;
+  let emptySeen = false;
   function checkOrphan() {
     if (alive()) return false;
     remove();
@@ -318,20 +330,50 @@
     // Набранное в поле сообщения и выбранные файлы YouGile сам сохраняет в черновик чата, поэтому
     // мешают обновлению только редакторы с текстом и поле, где сейчас набирают (название задачи и т. п.):
     // заполненные поля без курсора — уже сохранённые значения, иначе вкладка не обновилась бы никогда.
+    // Фокус берётся из activeElement: в скрытой вкладке он остаётся, а класс ck-focused CKEditor снимает.
     const active = document.activeElement;
     const typing = active?.matches?.('textarea, input:not([type]), input[type="text"]') ? [active.value] : [];
-    const editors = document.querySelectorAll('.chat-item-input .ck-editor__editable, .ck-editor__editable.ck-focused');
-    const fields = [...[...editors].map((field) => field.innerHTML), ...typing];
-    if (reply.orphanAction({ fields, files: 0, lastReloadAt, now: Date.now() }) === 'reload') {
+    const editable = active?.closest?.('[contenteditable="true"]');
+    const editors = [...document.querySelectorAll('.chat-item-input .ck-editor__editable'), ...(editable ? [editable] : [])];
+    const fields = [...editors.map((field) => field.innerHTML), ...typing];
+    const action = reply.orphanAction({ fields, files: 0, lastReloadAt, now: Date.now() });
+    // Поле опустело после плашки — возможно, YouGile очистил его по Enter, а отправка ещё идёт:
+    // обновление, только если и на следующей проверке пусто.
+    if (action === 'reload' && notice && !emptySeen) {
+      emptySeen = true;
+      return true;
+    }
+
+    if (action === 'reload') {
       try {
         sessionStorage.setItem(RELOAD_KEY, String(Date.now()));
       } catch {
         // См. выше.
       }
       window.location.reload();
+      return true;
     }
 
+    emptySeen = false;
+    showReloadNotice();
     return true;
+  }
+
+  function showReloadNotice() {
+    const target = anchor();
+    if (!target || (notice?.isConnected && notice.nextElementSibling === target)) return;
+    notice?.remove();
+    notice = element('section', 'kph-draft kph-draft--orphan');
+    notice.setAttribute('aria-label', 'Черновик агента');
+    const head = element('div', 'kph-draft__head');
+    head.append(element('span', 'kph-draft__title', 'Расширение обновилось'));
+    const actions = element('div', 'kph-draft__actions');
+    actions.append(button('kph-draft__prepare', 'Обновить страницу', () => window.location.reload()));
+    const text = element('span', 'kph-draft__status kph-draft__status--warn', 'Без обновления чаты YouGile не сохраняются и черновики агента здесь не появятся. Текст в поле сообщения YouGile сохранит сам, остальное набранное сначала сохраните.');
+    text.setAttribute('role', 'status');
+    actions.append(text);
+    notice.append(head, actions);
+    target.parentElement.insertBefore(notice, target);
   }
 
   storageGet([SKIPS_KEY, COLLAPSED_KEY]).then((stored) => {

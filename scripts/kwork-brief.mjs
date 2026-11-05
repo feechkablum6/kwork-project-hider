@@ -36,6 +36,18 @@ const ROOT_WAIT_DAYS = 7;
 const SYNC_STALE_MS = 10 * 60 * 1000;
 const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PANEL_DRAFTS_DIR = 'drafts';
+// Чаты YouGile пишет открытая вкладка YouGile, а не проход Kwork: она присылает каждый чат заново
+// не реже раза в 10 минут, и мост каждый раз перезаписывает его файл. Файл чата старше 15 минут —
+// вкладка закрыта, потеряла расширение или чат больше не подключён (например, компанию переименовали).
+const YOUGILE_STALE_MS = 15 * 60 * 1000;
+const isYougileSlug = (slug) => String(slug || '').startsWith('yougile-');
+function yougileSavedAt(targetDir, slug) {
+  try {
+    return statSync(join(targetDir, slug, core.DIALOG_DATA_NAME)).mtimeMs;
+  } catch {
+    return null;
+  }
+}
 const PANEL_DRAFT_MS = 7 * 24 * 60 * 60 * 1000;
 const BRIEF_CHARS = 6000;
 const FRESH_SYNC_WAIT_MS = Number(process.env.KPH_FRESH_SYNC_MS ?? 12_000);
@@ -273,7 +285,7 @@ export function describePanelDraft(draft, record, now, { fresh = true } = {}) {
 // Черновики панели этого заказа или этого чата: у клиента бывает несколько заказов,
 // и черновик из чата другого заказа этому агенту не «свой». Старые черновики без
 // отметок — по нику заказа.
-function panelDraftLines(targetDir, { sessionId, order = null, nicks = null, now, fresh = true }) {
+export function panelDraftLines(targetDir, { sessionId, order = null, nicks = null, now, fresh = true }) {
   const dir = join(targetDir, 'data', PANEL_DRAFTS_DIR);
   let names = [];
   try {
@@ -295,7 +307,9 @@ function panelDraftLines(targetDir, { sessionId, order = null, nicks = null, now
       continue;
     }
 
-    const line = describePanelDraft(draft, readJson(join(targetDir, slug, core.DIALOG_DATA_NAME)), now, { fresh });
+    const seenAt = isYougileSlug(slug) ? yougileSavedAt(targetDir, slug) : null;
+    const slugFresh = isYougileSlug(slug) ? seenAt !== null && now - seenAt <= YOUGILE_STALE_MS : fresh;
+    const line = describePanelDraft(draft, readJson(join(targetDir, slug, core.DIALOG_DATA_NAME)), now, { fresh: slugFresh });
     if (line) {
       lines.push(nicks?.length === 1 ? line : `${slug}: ${line}`);
     }
@@ -492,6 +506,20 @@ export function runBrief(input, options = {}) {
 
     const panelLines = panelDraftLines(targetDir, { sessionId: input?.session_id, order: context.order, nicks, now, fresh: briefFresh });
     parts.push(...panelLines);
+    const yougileNicks = nicks.filter(isYougileSlug);
+    if (yougileNicks.length > 0) {
+      const times = yougileNicks.map((slug) => yougileSavedAt(targetDir, slug));
+      const seenAt = times.includes(null) ? null : Math.min(...times);
+      if (seenAt === null || now - seenAt > YOUGILE_STALE_MS) {
+        if (isStart || parts.length > 0 || !state.__yougileWarned) {
+          const since = seenAt === null ? 'ещё ни разу не сохранялись' : `не сохранялись с ${formatMoment(new Date(seenAt).toISOString())}`;
+          parts.unshift(`Чаты YouGile ${since}: вкладка YouGile в Chrome закрыта, не обновлена после обновления расширения или мак спал. Новых сообщений оттуда на диске может не быть.`);
+          state.__yougileWarned = true;
+        }
+      } else {
+        state.__yougileWarned = false;
+      }
+    }
     const drafts = panelLines.length > 0 ? null : describePendingDrafts(options.pending, nicks, context.order);
     if (drafts && (isStart || parts.length > 0)) {
       parts.push(drafts);

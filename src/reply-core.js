@@ -193,18 +193,16 @@
 
   // Сообщение клиента для «Ответить»/«Цитировать»: самое свежее, где есть этот текст.
   // Агент цитирует точно, но пробелы, переносы и регистр Kwork может поменять.
-  function findTargetMessage(messages, target, { clientId = null, dialogKey = null, selfId = null } = {}) {
+  // Все сообщения клиента с этим текстом, по порядку: в групповом чате их могут прислать разные люди.
+  function matchingMessages(messages, target, { clientId = null, dialogKey = null, selfId = null } = {}) {
     const needle = normalizeText(target);
-    if (!needle) return null;
-    const list = Array.isArray(messages) ? messages : [];
-    for (let index = list.length - 1; index >= 0; index -= 1) {
-      const message = list[index];
-      if (isClient(message, clientId, dialogKey, selfId) && normalizeText(message.text).includes(needle)) {
-        return message;
-      }
-    }
+    if (!needle) return [];
+    return (Array.isArray(messages) ? messages : [])
+      .filter((message) => isClient(message, clientId, dialogKey, selfId) && normalizeText(message.text).includes(needle));
+  }
 
-    return null;
+  function findTargetMessage(messages, target, options = {}) {
+    return matchingMessages(messages, target, options).at(-1) || null;
   }
 
   // Точный кусок исходного текста под «Цитировать»: Kwork выделяет его в самом
@@ -486,6 +484,7 @@
     containment,
     draftProgress,
     findTargetMessage,
+    matchingMessages,
     inheritTargets,
     locateFragment,
     normalizeText,

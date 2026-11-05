@@ -98,6 +98,11 @@ test('черновик в чате YouGile: новое сообщение люб
   const base = [{ id: '1', time: new Date(at(1)).toISOString(), authorId: 'u-ivan', text: 'а сроки?' }];
   const options = { clientId: null, dialogKey: 'yougile-acme-1', selfId: ME };
   assert.equal(reply.findTargetMessage(base, 'сроки', options).id, '1');
+  // Одинаковый текст от двух участников: ответ встаёт на последнее, а панель знает, что выбор неоднозначен.
+  const twins = [...base, { id: '4', time: new Date(at(2)).toISOString(), authorId: 'u-petr', authorName: 'Пётр', text: 'А сроки?' }];
+  assert.deepEqual(reply.matchingMessages(twins, 'сроки', options).map((item) => item.id), ['1', '4']);
+  assert.equal(reply.findTargetMessage(twins, 'сроки', options).id, '4');
+  assert.deepEqual(reply.matchingMessages(twins, 'нет такого', options), []);
   const sent = reply.draftProgress(draft, [...base, { id: '2', time: new Date(at(3)).toISOString(), authorId: ME, text: 'Сделаю к пятнице' }], options);
   assert.deepEqual([sent.stale, sent.finished], [false, true]);
   const stale = reply.draftProgress(draft, [...base, { id: '3', time: new Date(at(3)).toISOString(), authorId: 'u-petr', text: 'и ещё' }], options);
@@ -243,4 +248,36 @@ test('черновик в заказе с Kwork и чатами YouGile: чей 
   assert.equal(draftFor('a', '**1. Ответить на** «Когда схема базы?»\nСообщение клиенту:\n```\nВ пятницу\n```\n').slug, 'yougile-acme-1a2b3c4d5e6f');
   assert.equal(draftFor('b', '**1. Ответить на** «Сроки по этапу?»\nСообщение клиенту:\n```\nДо 10.11\n```\n').slug, 'ivan');
   assert.equal(draftFor('c', 'Сообщение клиенту:\n```\nНовости по этапу\n```\n').slug, 'ivan');
+});
+
+test('свежесть чата YouGile — по времени записи самого чата, а не по Kwork: без неё «не отправлен» не утверждается', async () => {
+  const { panelDraftLines, runBrief } = await import('../scripts/kwork-brief.mjs');
+  const world = createWorld('- veb: ivan, yougile-acme-*\n');
+  const key = 'yougile-acme-1a2b3c4d5e6f';
+  fs.mkdirSync(path.join(world.targetDir, 'data', 'drafts'), { recursive: true });
+  fs.writeFileSync(path.join(world.targetDir, 'data', 'drafts', `${key}.json`), JSON.stringify({
+    id: 'd1', at: new Date(at(5)).toISOString(), basedOn: new Date(at(4)).toISOString(), parts: [{ n: 1, mode: 'plain', text: 'Сделаю к пятнице' }],
+  }));
+  const now = Date.now();
+  const lines = () => panelDraftLines(world.targetDir, { nicks: [key], now, fresh: true }).join('\n');
+  const dataPath = path.join(world.targetDir, key, 'данные.json');
+
+  // Вкладка прислала чат — записан только что, сводка уверена.
+  handleCommand(world.targetDir, { command: 'save-dialog', dialog: dialog(key, [message(4, 'u-ivan', 'Когда?')]) });
+  assert.match(lines(), /НЕ отправлен/);
+
+  // Другой чат YouGile (не из заказа) свежести этому чату не прибавляет.
+  const old = new Date(now - 16 * 60 * 1000);
+  fs.utimesSync(dataPath, old, old);
+  handleCommand(world.targetDir, { command: 'save-dialog', dialog: dialog('yougile-other-111111111111', [message(6, 'u-ivan', 'не наш чат')]) });
+  assert.match(lines(), /отправлен ли он, неизвестно/);
+
+  // Сводка заказа сама говорит, что чаты YouGile не сохраняются.
+  const orderDir = path.join(world.kworkRoot, 'Активные', 'veb');
+  const brief = runBrief({ session_id: 's1', cwd: orderDir, hook_event_name: 'SessionStart' }, { home: world.home, kworkRoot: world.kworkRoot, targetDir: world.targetDir, now, pending: [] });
+  assert.match(brief, /Чаты YouGile не сохранялись с .*: вкладка YouGile в Chrome закрыта/);
+
+  // Вкладка снова прислала чат — свежо.
+  handleCommand(world.targetDir, { command: 'save-dialog', dialog: dialog(key, [message(4, 'u-ivan', 'Когда?')]) });
+  assert.match(lines(), /НЕ отправлен/);
 });
