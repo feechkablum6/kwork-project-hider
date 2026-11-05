@@ -44,11 +44,11 @@ function createFakeClaude({ home, now = Date.now }) {
 
   // Чат в списке Desktop: метаданные Desktop с его номером и папкой. Показ в Desktop кладёт их туда же.
   const desktopDirs = new Map();
-  fake.addToDesktop = (sessionId, { archived = false, cwd, title } = {}) => {
+  fake.addToDesktop = (sessionId, { archived = false, cwd, title, side = false } = {}) => {
     const dir = path.join(home, 'Library', 'Application Support', 'Claude', 'claude-code-sessions', 'acct', 'org');
     fs.mkdirSync(dir, { recursive: true });
     if (cwd) desktopDirs.set(sessionId, cwd);
-    fs.writeFileSync(path.join(dir, `local_${sessionId}.json`), JSON.stringify({ sessionId: `local_${sessionId}`, cliSessionId: sessionId, isArchived: archived, ...(cwd ? { cwd: fs.realpathSync(cwd) } : {}), ...(title ? { title } : {}) }));
+    fs.writeFileSync(path.join(dir, `local_${sessionId}.json`), JSON.stringify({ sessionId: `local_${sessionId}`, cliSessionId: sessionId, isArchived: archived, ...(cwd ? { cwd: fs.realpathSync(cwd) } : {}), ...(title ? { title } : {}), ...(side ? { spawnedFrom: { sessionId: 'local_parent', sideSession: true } } : {}) }));
   };
   // Ссылка resume: чат появляется в списке Desktop или возвращается из архива (папка не меняется).
   const open = (url) => {

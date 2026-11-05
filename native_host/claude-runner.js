@@ -296,7 +296,10 @@ function createClaudeRunner({ env = process.env, home = os.homedir(), processes 
   // поднимает в его папке временный процесс со своим номером, и побудка там пропала бы.
   function openChat(dir, sessionId, anyInDir) {
     const variants = new Set(cwdVariants(dir));
-    const candidates = openChats().filter((item) => item.sessionId === sessionId || (anyInDir && cwdVariants(item.cwd).some((variant) => variants.has(variant))));
+    // Побочный чат (отдельная задача, запущенная из чата заказа) — не чат заказа, даже если открыт в его папке.
+    const desktop = anyInDir ? desktopChats() : new Map();
+    const candidates = openChats().filter((item) => item.sessionId === sessionId
+      || (anyInDir && !desktop.get(item.sessionId)?.side && cwdVariants(item.cwd).some((variant) => variants.has(variant))));
     let best = null;
     for (const item of candidates) {
       const file = transcript(item.cwd, item.sessionId);
@@ -388,7 +391,8 @@ function createClaudeRunner({ env = process.env, home = os.homedir(), processes 
         else if (depth === 2 && /^local_.*\.json$/.test(entry.name)) {
           try {
             const meta = JSON.parse(fs.readFileSync(full, 'utf8'));
-            if (typeof meta.cliSessionId === 'string') chats.set(meta.cliSessionId, { localId: meta.sessionId, archived: meta.isArchived === true, cwd: meta.cwd || null, title: meta.title || null });
+            // side — побочная сессия, которую запустил другой чат (задача в отдельной сессии): не чат заказа.
+            if (typeof meta.cliSessionId === 'string') chats.set(meta.cliSessionId, { localId: meta.sessionId, archived: meta.isArchived === true, cwd: meta.cwd || null, title: meta.title || null, side: meta.spawnedFrom?.sideSession === true });
           } catch {
             // Desktop переписывает файл прямо сейчас.
           }

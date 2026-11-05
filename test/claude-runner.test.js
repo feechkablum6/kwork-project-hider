@@ -238,8 +238,8 @@ test('дошло ли сообщение до чата — метка побуд
   assert.equal(runner.inDesktop(ID), true);
   // Чат в архиве Desktop — тоже в Desktop, но в списке его не видно.
   fs.writeFileSync(path.join(meta, 'local_z.json'), JSON.stringify({ sessionId: 'local_z', cliSessionId: OTHER, isArchived: true, cwd: '/k/shop' }));
-  assert.deepEqual(runner.desktopChats().get(OTHER), { localId: 'local_z', archived: true, cwd: '/k/shop', title: null });
-  assert.deepEqual(runner.desktopChats().get(ID), { localId: 'local_y', archived: false, cwd: null, title: null });
+  assert.deepEqual(runner.desktopChats().get(OTHER), { localId: 'local_z', archived: true, cwd: '/k/shop', title: null, side: false });
+  assert.deepEqual(runner.desktopChats().get(ID), { localId: 'local_y', archived: false, cwd: null, title: null, side: false });
 });
 
 test('служебная просьба будильщика и ответ на неё — не работа в чате: чат давнего заказа не становится «последним, где работали»', () => {

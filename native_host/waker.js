@@ -256,13 +256,16 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
           }
         }
 
-        if (nicks.has(slug)) {
-          orders.push({ name, dir, done, deploy: map[name]?.deploy ?? null });
+        const pattern = !nicks.has(slug) && (map[name]?.nicks || []).some((nick) => wakeCore.nickMatch(nick, slug) === 'pattern');
+        if (nicks.has(slug) || pattern) {
+          orders.push({ name, dir, done, deploy: map[name]?.deploy ?? null, pattern });
         }
       }
     }
 
-    return orders;
+    // Точная строка заказа важнее шаблона «yougile-<компания>-*»: так один чат компании уводят в другой заказ.
+    const exact = orders.filter((order) => !order.pattern);
+    return (exact.length > 0 ? exact : orders).map(({ pattern, ...order }) => order);
   }
 
   const claimedDir = path.join(dirtyDir, '.claimed');
@@ -559,15 +562,25 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
     }
 
     const route = routeFor(slug, state);
-    const chat = state.chats[route.key];
-    const nick = record.key || slug;
+    // Чат YouGile без заказа в корень Kwork не будит: строку из списка заказов убрали — чат отключён.
+    if (record.source === 'yougile' && route.root) {
+      settle(state, slug, news);
+      log(`побудка ${slug}: чат YouGile не подключён к заказу — пропущено`);
+      return;
+    }
+
     const desktop = runner.desktopChats();
+    // Побочный чат, запущенный из чата заказа (отдельная задача в той же папке), — не чат заказа:
+    // 05.11.2026 побудка YouGile ушла в такой, потому что он был свежее основного.
+    const side = (id) => desktop.get(id)?.side === true;
+    const chat = state.chats[route.key] && !side(state.chats[route.key].sessionId) ? state.chats[route.key] : null;
+    const nick = record.key || slug;
 
     // Чат заказа один: наш прошлый, а у заказа без него — самый свежий чат Desktop его папки, в том числе
     // чат пользователя, иначе чат Desktop с названием заказа в другой папке Kwork: заказ заводят и из чата
     // в корне Kwork, и пользователь работает в нём (29.10.2026). Корень Kwork общий для всех клиентов без
     // заказа и прочей работы — там только свой чат клиента. Чаты вне Desktop (T3, терминал) не берутся.
-    let sessionId = chat?.sessionId || (route.order ? runner.latestChat(route.dir, (id) => desktop.has(id))?.sessionId : null) || null;
+    let sessionId = chat?.sessionId || (route.order ? runner.latestChat(route.dir, (id) => desktop.has(id) && !side(id))?.sessionId : null) || null;
     let dir = chat?.dir || route.dir;
     const named = !sessionId && route.order ? namedChat(desktop, route.order.name) : null;
     if (named) [sessionId, dir] = named;
@@ -682,7 +695,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
     const inside = (cwd) => [kworkRoot, root].some((base) => cwd === base || cwd.startsWith(`${base}/`));
     // Из одноимённых — самый свежий журнал.
     const fresh = ([id, item]) => runner.transcript(item.cwd, id)?.mtimeMs || 0;
-    const found = [...desktop].filter(([, item]) => item.title === name && item.cwd && inside(item.cwd)).sort((left, right) => fresh(right) - fresh(left));
+    const found = [...desktop].filter(([, item]) => item.title === name && !item.side && item.cwd && inside(item.cwd)).sort((left, right) => fresh(right) - fresh(left));
     const [id, item] = found.find(([, entry]) => !entry.archived) || found[0] || [];
     return id ? [id, item.cwd] : null;
   }

@@ -114,8 +114,19 @@ export function findOrderNicks(orderDir, knownSlugs, orderMap = {}) {
     }
   };
 
-  for (const nick of orderMap[orderDir.split(sep).pop()] || []) {
-    add(nick);
+  // Шаблон «yougile-<компания>-*» берёт чаты компании, кроме уведённых точной строкой в другой заказ.
+  const order = orderDir.split(sep).pop();
+  const exactElsewhere = (slug) => Object.entries(orderMap)
+    .some(([other, list]) => other !== order && list.some((nick) => wakeCore.nickMatch(nick, slug) === 'exact'));
+  for (const nick of orderMap[order] || []) {
+    if (!String(nick).trim().endsWith('*')) {
+      add(nick);
+      continue;
+    }
+
+    for (const slug of knownSlugs) {
+      if (wakeCore.nickMatch(nick, slug) === 'pattern' && !exactElsewhere(slug)) add(slug);
+    }
   }
 
   for (const name of ORDER_FILES) {

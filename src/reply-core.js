@@ -183,7 +183,9 @@
 
   // ---------- сообщения клиента ----------
 
-  function isClient(message, clientId, dialogKey) {
+  // selfId — свой номер в чате YouGile: там собеседников несколько, клиент — любой, кроме меня.
+  function isClient(message, clientId, dialogKey, selfId = null) {
+    if (selfId && message?.authorId) return String(message.authorId) !== String(selfId);
     if (clientId && message?.authorId) return String(message.authorId) === String(clientId);
     const key = String(dialogKey || '').trim().toLowerCase();
     return Boolean(key) && String(message?.authorName || '').trim().toLowerCase() === key;
@@ -191,13 +193,13 @@
 
   // Сообщение клиента для «Ответить»/«Цитировать»: самое свежее, где есть этот текст.
   // Агент цитирует точно, но пробелы, переносы и регистр Kwork может поменять.
-  function findTargetMessage(messages, target, { clientId = null, dialogKey = null } = {}) {
+  function findTargetMessage(messages, target, { clientId = null, dialogKey = null, selfId = null } = {}) {
     const needle = normalizeText(target);
     if (!needle) return null;
     const list = Array.isArray(messages) ? messages : [];
     for (let index = list.length - 1; index >= 0; index -= 1) {
       const message = list[index];
-      if (isClient(message, clientId, dialogKey) && normalizeText(message.text).includes(needle)) {
+      if (isClient(message, clientId, dialogKey, selfId) && normalizeText(message.text).includes(needle)) {
         return message;
       }
     }
@@ -358,7 +360,7 @@
 
   // Черновик устарел, когда клиент написал после того, как агент его составил.
   // Отправленные части — свои сообщения после черновика, похожие на текст части.
-  function draftProgress(draft, messages, { clientId = null, dialogKey = null, events = [] } = {}) {
+  function draftProgress(draft, messages, { clientId = null, dialogKey = null, selfId = null, events = [] } = {}) {
     const allParts = Array.isArray(draft?.parts) ? draft.parts : [];
     // Пропущенные части в сопоставлении не участвуют: иначе пропущенная часть с тем же
     // текстом забирает отправленное у следующей.
@@ -368,8 +370,8 @@
     const after = (item) => (Date.parse(item?.time) || 0) > since;
     const list = (Array.isArray(messages) ? messages : []).filter(after);
     // Служебные сообщения клиента («Заказ создан») — не новый вопрос: черновик живёт.
-    const stale = list.some((message) => isClient(message, clientId, dialogKey) && !message.event);
-    const own = list.filter((message) => !isClient(message, clientId, dialogKey));
+    const stale = list.some((message) => isClient(message, clientId, dialogKey, selfId) && !message.event);
+    const own = list.filter((message) => !isClient(message, clientId, dialogKey, selfId));
     const options = (Array.isArray(events) ? events : []).filter((event) => after(event) && event.type === 13);
     const done = new Set();
     // Каждое отправленное засчитывается одной части: два одинаковых ответа или две

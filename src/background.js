@@ -1727,6 +1727,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // Чат YouGile (yougile-content.js) — переписка на диск; мост сам решает, подключён ли чат к заказу.
+  if (message?.type === 'kph-yougile-dialog' && message.dialog?.key && message.dialog.source === 'yougile') {
+    request({ command: 'save-dialog', dialog: message.dialog })
+      .then((result) => sendResponse({ ok: Boolean(result?.ok) }))
+      .catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+
   // Черновик агента для панели над полем ввода. Только чтение: панель сама
   // ничего не отправляет и в мост не пишет.
   if (message?.type === 'kph-get-draft' && (message.dialogKey || message.orderId)) {

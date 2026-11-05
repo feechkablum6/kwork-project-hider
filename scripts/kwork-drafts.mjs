@@ -806,14 +806,26 @@ export function capture(input, options = {}) {
 
 // ---------- черновик для панели на Kwork ----------
 
-const WAKE_NICK = /\[Kwork-побудка #[0-9a-f]{6,20}\] (?:Клиент ([^\s:]+)(?::| написал)|Вы написали клиенту (\S+) на Kwork)/g;
+const WAKE_NICK = /\[Kwork-побудка #[0-9a-f]{6,20}\] (?:Клиент ([^\s:]+)(?::| написал)|Вы написали клиенту (\S+) (?:на Kwork|в YouGile))/g;
 const PANEL_DRAFTS_DIR = 'drafts';
 
 // Чей это черновик: единственный клиент заказа, иначе — ник из последней побудки
 // в этом чате (корневой чат Kwork разбирает разных клиентов).
-function draftNick(nicks, transcriptText, targetDir) {
+function draftNick(nicks, transcriptText, targetDir, parts = []) {
   if (nicks.length === 1) {
     return nicks[0];
+  }
+
+  // У заказа и Kwork, и чаты YouGile: «Ответить»/«Цитировать» называют сообщение — чей диалог
+  // его содержит, того и черновик.
+  const targets = parts.filter((part) => ['reply', 'quote'].includes(part.mode) && part.target).map((part) => part.target);
+  if (targets.length > 0) {
+    const owners = nicks.filter((slug) => {
+      const record = readJson(join(targetDir, slug, core.DIALOG_DATA_NAME));
+      const options = { clientId: record?.clientId || null, dialogKey: record?.key || slug, selfId: record?.selfId || null };
+      return Boolean(record) && targets.every((target) => reply.findTargetMessage(record.messages || [], target, options));
+    });
+    if (owners.length === 1) return owners[0];
   }
 
   let found = null;
@@ -824,7 +836,9 @@ function draftNick(nicks, transcriptText, targetDir) {
     }
   }
 
-  return found;
+  // Побудок в чате не было — черновик клиенту Kwork, если он у заказа один (чаты YouGile его не отбирают).
+  const kwork = nicks.filter((slug) => !slug.startsWith('yougile-'));
+  return found || (kwork.length === 1 ? kwork[0] : null);
 }
 
 // Панель на странице переписки берёт части последнего ответа агента: на что
@@ -842,7 +856,7 @@ export function capturePanelDraft({ turn, nicks, transcriptText, sessionId, orde
     return null;
   }
 
-  const slug = draftNick(nicks, transcriptText, paths.targetDir);
+  const slug = draftNick(nicks, transcriptText, paths.targetDir, source.parts);
   if (!slug) {
     return null;
   }
@@ -850,9 +864,7 @@ export function capturePanelDraft({ turn, nicks, transcriptText, sessionId, orde
   const record = readJson(join(paths.targetDir, slug, core.DIALOG_DATA_NAME)) || {};
   const messages = Array.isArray(record.messages) ? record.messages : [];
   const clientId = record.clientId ? String(record.clientId) : null;
-  const lastClient = [...messages].reverse().find((message) => (clientId
-    ? String(message.authorId) === clientId
-    : String(message.authorName || '').toLowerCase() === String(record.key || slug).toLowerCase()));
+  const lastClient = [...messages].reverse().find((message) => isClientMessage(message, { ...record, key: record.key || slug }));
   const draft = {
     id: createHash('sha1').update(`${source.reply.uuid || source.reply.at}:panel`).digest('hex').slice(0, 12),
     at: source.reply.at || new Date().toISOString(),
@@ -878,7 +890,7 @@ export function capturePanelDraft({ turn, nicks, transcriptText, sessionId, orde
   const sameQuestion = previous?.slug === slug && (previous.basedOn || null) === draft.basedOn
     && Boolean(draft.session) && previous.session === draft.session;
   const sent = sameQuestion
-    ? reply.draftProgress(previous, messages, { clientId, dialogKey: record.key || slug, events: record.events || [] }).done
+    ? reply.draftProgress(previous, messages, { clientId, dialogKey: record.key || slug, selfId: record.selfId || null, events: record.events || [] }).done
     : [];
   draft.parts = reply.inheritTargets(source.parts, sameQuestion ? previous : null, sent);
 

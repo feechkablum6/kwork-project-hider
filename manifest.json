@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Kwork — скрытие проектов",
-  "version": "1.31.3",
-  "description": "Скрывает ненужные проекты на бирже Kwork, извлекает данные заказов, показывает ближайшую выплату и сохраняет переписки с клиентами на диск.",
+  "version": "1.32.0",
+  "description": "Скрывает ненужные проекты на бирже Kwork, извлекает данные заказов, показывает ближайшую выплату и сохраняет переписки с клиентами на диск, а также чаты YouGile.",
   "permissions": [
     "storage",
     "nativeMessaging",
@@ -65,6 +65,33 @@
         "src/content.css"
       ],
       "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://yougile.com/*",
+        "https://*.yougile.com/*"
+      ],
+      "js": [
+        "src/yougile-core.js",
+        "src/yougile-main.js"
+      ],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://yougile.com/*",
+        "https://*.yougile.com/*"
+      ],
+      "js": [
+        "src/reply-core.js",
+        "src/yougile-core.js",
+        "src/yougile-content.js"
+      ],
+      "css": [
+        "src/content.css"
+      ],
+      "run_at": "document_end"
     }
   ],
   "web_accessible_resources": [

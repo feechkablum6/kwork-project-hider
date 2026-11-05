@@ -6,6 +6,8 @@ const path = require('node:path');
 
 const core = require('../src/inbox-core.js');
 const projectCore = require('../src/project-core.js');
+const wakeCore = require('./wake-core.js');
+const yougileCore = require('../src/yougile-core.js');
 
 const DATA_DIR_NAME = 'data';
 const DIALOG_LIST_FILE = '_dialogs.json';
@@ -109,7 +111,30 @@ function markDialogDirty(targetDir, slug) {
   fs.writeFileSync(path.join(dirtyDir, slug), '');
 }
 
-function saveDialog(targetDir, { dialog, sample }) {
+// Чат YouGile ложится на диск, только если он подключён к заказу строкой в
+// Kwork/docs/заказы-клиенты.md: чужие компании и личные чаты не копятся и не будят.
+// Личный чат приходит ключами по каждой компании собеседника — берётся подключённая.
+function routedYougileDialog(targetDir, dialog) {
+  let map = {};
+  try {
+    map = wakeCore.parseOrderMap(fs.readFileSync(path.join(path.dirname(targetDir), 'docs', 'заказы-клиенты.md'), 'utf8'));
+  } catch {
+    return null;
+  }
+
+  // Ключ пришёл со страницы YouGile: только ключ чата YouGile, иначе страница записала бы в переписку Kwork.
+  const key = [dialog.key, ...(Array.isArray(dialog.alternatives) ? dialog.alternatives : [])]
+    .find((item) => yougileCore.isDialogKey(item) && wakeCore.isRoutedSlug(map, item));
+  return key ? { ...dialog, key } : null;
+}
+
+function saveDialog(targetDir, { dialog: received, sample }) {
+  const yougile = received?.source === 'yougile';
+  const dialog = yougile ? routedYougileDialog(targetDir, received) : received;
+  if (!dialog) {
+    return { path: null, messages: 0, skipped: true };
+  }
+
   const slug = core.buildDialogSlug(dialog?.key);
   if (!slug) {
     throw new Error('переписка без имени диалога');
@@ -132,10 +157,9 @@ function saveDialog(targetDir, { dialog, sample }) {
 
   const previous = readJson(jsonPath);
   const dialogContext = { dialogKey: dialog.key, clientId: dialog.clientId || previous?.clientId || null };
-  const messages = core.filterDialogMessages(
-    core.mergeMessages(previous?.messages, dialog?.messages),
-    dialogContext,
-  );
+  // В чате YouGile участников больше двух, и ключ диалога не имя собеседника: фильтр Kwork там не нужен.
+  const merged = core.mergeMessages(previous?.messages, dialog?.messages);
+  const messages = yougile ? merged : core.filterDialogMessages(merged, dialogContext);
   // Точка сверки — последнее сообщение, до которого история на диске сплошная. Двигает
   // её только выгрузка, подтвердившая сплошность (verified или полная история), и только
   // до конца своей пачки. Тихая запись (getnewmessages не видит сообщений заказа) и
@@ -151,6 +175,8 @@ function saveDialog(targetDir, { dialog, sample }) {
     title: dialog.title || previous?.title || dialog.key,
     url: dialog.url || previous?.url || `https://kwork.ru/inbox/${dialog.key}`,
     clientId: dialog.clientId || previous?.clientId || null,
+    // seenUntil — прочитанное в YouGile на момент первой записи чата: будильщик не будит по нему.
+    ...(yougile ? { source: 'yougile', selfId: dialog.selfId || previous?.selfId || null, seenUntil: previous ? previous.seenUntil ?? null : dialog.seenUntil || null } : {}),
     historyStrategy: dialog.strategy || previous?.historyStrategy || null,
     historyComplete: dialog.complete === undefined ? previous?.historyComplete ?? null : dialog.complete,
     verifiedTime,
@@ -598,6 +624,7 @@ function getDraft(targetDir, { dialogKey, orderId } = {}) {
     slug,
     dialogKey: record?.key || draft.nick || slug,
     clientId: record?.clientId || draft.clientId || null,
+    selfId: record?.selfId || null,
     draft,
     messages,
     events: (Array.isArray(record?.events) ? record.events : []).slice(-40),

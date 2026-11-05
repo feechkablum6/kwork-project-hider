@@ -21,11 +21,11 @@ test('manifest использует MV3, хранилище, мост на ди�
   assert.equal(fs.existsSync(path.join(projectRoot, 'src/background.js')), true);
 });
 
-test('content scripts запускаются только на страницах Kwork', () => {
+test('content scripts Kwork запускаются только на страницах Kwork', () => {
   const manifest = readManifest();
   const [mainWorldScript, contentScript] = manifest.content_scripts;
 
-  assert.equal(manifest.content_scripts.length, 2);
+  assert.equal(manifest.content_scripts.length, 4);
   assert.deepEqual(mainWorldScript.matches, ['https://kwork.ru/*']);
   assert.equal(mainWorldScript.exclude_matches, undefined);
   assert.deepEqual(
@@ -57,6 +57,20 @@ test('content scripts запускаются только на страница�
     ],
   );
   assert.deepEqual(contentScript.css, ['src/content.css']);
+});
+
+test('на YouGile — только чтение чатов и панель черновика, без скриптов Kwork', () => {
+  const [, , mainWorld, isolated] = readManifest().content_scripts;
+  const matches = ['https://yougile.com/*', 'https://*.yougile.com/*'];
+  assert.deepEqual(mainWorld.matches, matches);
+  assert.deepEqual(mainWorld.js, ['src/yougile-core.js', 'src/yougile-main.js']);
+  assert.equal(mainWorld.world, 'MAIN');
+  assert.deepEqual(isolated.matches, matches);
+  assert.deepEqual(isolated.js, ['src/reply-core.js', 'src/yougile-core.js', 'src/yougile-content.js']);
+  assert.equal(isolated.world, undefined);
+  // Ядро YouGile в обоих мирах: при одинаковом run_at Chrome отдал бы его только одному набору (docs/do-not.md).
+  assert.notEqual(isolated.run_at, mainWorld.run_at);
+  assert.deepEqual(isolated.css, ['src/content.css']);
 });
 
 test('изолированный мир получает оба ядра отдельными файлами, идентичными исходным', () => {

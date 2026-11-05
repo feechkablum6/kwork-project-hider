@@ -247,6 +247,7 @@ export function describePanelDraft(draft, record, now, { fresh = true } = {}) {
   const progress = reply.draftProgress(draft, record?.messages || [], {
     clientId: record?.clientId || draft.clientId || null,
     dialogKey: record?.key || draft.nick || null,
+    selfId: record?.selfId || null,
     events: record?.events || [],
   });
   if (progress.finished) {
@@ -578,8 +579,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     let freshSync = null;
     if (event === 'UserPromptSubmit' || event === 'SessionStart') {
       const order = resolveOrderNicks(input);
-      if (order?.nicks.length > 0) {
-        freshSync = await requestFreshSync(order.targetDir, order.nicks);
+      // Чаты YouGile на Kwork не найти: их пишет открытая вкладка YouGile.
+      const kworkNicks = (order?.nicks || []).filter((nick) => !nick.startsWith('yougile-'));
+      if (kworkNicks.length > 0) {
+        freshSync = await requestFreshSync(order.targetDir, kworkNicks);
       }
     }
 
