@@ -157,19 +157,44 @@
     return list ? [...list.querySelectorAll('a')].find((link) => LOAD_MORE.includes(link.textContent.trim()) && visible(link)) || null : null;
   }
 
+  // reason — почему не нашлось: «stalled» — история не догрузилась за 3 с, «hidden» — Kwork
+  // пишет «Показаны N последних», а ссылки догрузки нет (подпись сменили, как 05.11.2026).
   async function findMessageLoading(wanted) {
     let found = findMessage(wanted);
-    if (!wanted.key && !wanted.target) return found;
+    let reason = null;
+    if (!wanted.key && !wanted.target) return { found, reason };
     for (let round = 0; !found && isTrack && round < 5; round += 1) {
       const before = document.querySelectorAll('.js-message-block').length;
-      if (!clickSafely(loadMoreLink())) break;
-      if (!await waitFor(() => document.querySelectorAll('.js-message-block').length > before, 3000)) break;
+      const link = loadMoreLink();
+      if (!clickSafely(link)) {
+        if (/Показаны \d+ последних/.test(trackList()?.$el?.textContent || '')) reason = 'hidden';
+        break;
+      }
+
+      if (!await waitFor(() => document.querySelectorAll('.js-message-block').length > before, 3000)) {
+        reason = 'stalled';
+        break;
+      }
+
       // Ключ «автор:время» ticks-main.js ставит догруженным блокам через 300 мс: по ключу точнее, чем по тексту.
       await wait(400);
       found = findMessage(wanted);
+      if (link.textContent.trim() === 'Показать все') break;
     }
 
-    return found;
+    return { found, reason };
+  }
+
+  // Почему часть не подготовлена — словами для пользователя.
+  function missingText(onlyIf, reason) {
+    if (onlyIf) {
+      return `Агент обновил черновик, но сообщения клиента для ответа нет на странице, в поле прежний текст. ${isTrack ? 'Нажмите «Подготовить часть», панель догрузит переписку' : 'Прокрутите переписку выше и нажмите «Подготовить часть»'}`;
+    }
+
+    if (!isTrack) return 'Сообщение клиента для ответа не загружено на странице, поле не тронуто. Прокрутите переписку выше и нажмите ещё раз';
+    if (reason === 'stalled') return 'Переписка заказа не успела догрузиться, поле не тронуто. Нажмите ещё раз';
+    if (reason === 'hidden') return 'Не получилось открыть всю переписку заказа, поле не тронуто. Ответьте из переписки с клиентом';
+    return 'Сообщение клиента для ответа не нашлось в переписке заказа, поле не тронуто. Сверьте цитату в черновике';
   }
 
   function quoteSet() {
@@ -370,7 +395,8 @@
       return { ok: false, quiet: true };
     }
 
-    if (typing) typing.active = false;
+    // Прежняя часть ещё печатается — дописать её целиком: если новую подготовить не выйдет, в поле не останется обрывка.
+    finishTyping();
 
     ensureTrackForm();
     if (!messageField()) {
@@ -388,7 +414,7 @@
     if (mode === 'reply' || mode === 'quote') {
       // Догрузка истории — только по кнопке: автоподмена не листает переписку за пользователя.
       const fieldBefore = editorText();
-      const found = onlyIf ? findMessage({ key, target }) : await findMessageLoading({ key, target });
+      const { found, reason } = onlyIf ? { found: findMessage({ key, target }), reason: null } : await findMessageLoading({ key, target });
       // Пока шла догрузка (до 15 с), пользователь мог начать печатать: его текст не затираем.
       if (!sameText(editorText(), fieldBefore)) {
         return { ok: false, busy: true, error: 'Пока догружалась переписка, текст в поле изменился. Нажмите ещё раз, чтобы заменить его частью черновика' };
@@ -396,14 +422,7 @@
 
       // Без привязки часть не готовим: обычным сообщением она ушла бы клиенту без ответа (05.11.2026).
       if (!found) {
-        return {
-          ok: false,
-          error: onlyIf
-            ? 'Агент обновил черновик, но сообщения клиента для ответа нет на странице, в поле прежний текст. Нажмите «Подготовить часть», панель догрузит переписку'
-            : isTrack
-              ? 'Сообщение клиента для ответа не нашлось даже во всей переписке заказа, поле не тронуто. Сверьте цитату в черновике'
-              : 'Сообщение клиента для ответа не загружено на странице, поле не тронуто. Прокрутите переписку выше и нажмите ещё раз',
-        };
+        return { ok: false, error: missingText(onlyIf, reason) };
       }
 
       if (mode === 'quote') {

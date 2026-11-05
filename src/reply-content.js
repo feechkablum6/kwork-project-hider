@@ -597,7 +597,10 @@
 
     force = null;
     if (!event.data.ok) {
-      setStatus(event.data.error || 'Не получилось подготовить часть', 'warn');
+      const warning = { text: event.data.error || 'Не получилось подготовить часть', tone: 'warn' };
+      // Прежняя часть ещё допечатывается: её конец не должен стереть предупреждение.
+      if (typingFor) typingFor.done = warning;
+      setStatus(warning.text, warning.tone);
       return;
     }
 

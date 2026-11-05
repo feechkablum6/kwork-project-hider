@@ -242,7 +242,7 @@ test('по кнопке текст печатается по знаку и Kwork
 
 test('на странице заказа «Ответить» на старое сообщение догружает историю ссылкой «Показать все» или «Загрузить ещё», а не вставляет текст без ответа', () => {
   const main = code('reply-main.js');
-  assert.match(main, /const found = onlyIf \? findMessage\(\{ key, target \}\) : await findMessageLoading\(\{ key, target \}\)/);
+  assert.match(main, /const \{ found, reason \} = onlyIf \? \{ found: findMessage\(\{ key, target \}\), reason: null \} : await findMessageLoading\(\{ key, target \}\)/);
   // 05.11.2026 под 10 последними сообщениями заказа стояла «Показать все», а не «Загрузить ещё».
   assert.match(main, /const LOAD_MORE = \['Показать все', 'Загрузить ещё'\];/);
   assert.match(main, /const list = trackList\(\)\?\.\$el;[\s\S]*LOAD_MORE\.includes\(link\.textContent\.trim\(\)\)/);
@@ -253,11 +253,13 @@ test('на странице заказа «Ответить» на старое 
   // Ответ страницы записывается за той частью, что ушла командой, а не за пришедшей позже.
   assert.match(code('reply-content.js'), /pending = \{ requestId, n: part\.n, auto: Boolean\(onlyIf\), draft, part \};/);
   assert.match(code('reply-content.js'), /const \{ draft, part, auto \} = pending;/);
-  assert.match(main, /if \(!wanted\.key && !wanted\.target\) return found;/);
+  assert.match(main, /if \(!wanted\.key && !wanted\.target\) return \{ found, reason \};/);
   assert.match(main, /await wait\(400\);\s*found = findMessage\(wanted\);/);
+  // «Показать все» открывает всю историю: второго круга (и клика по чужой ссылке с той же подписью) нет.
+  assert.match(main, /if \(link\.textContent\.trim\(\) === 'Показать все'\) break;/);
   // Догрузка только на странице заказа и с ограничением кругов; клик идёт через тот же замок, что и SAFE_CLICKS.
   assert.match(main, /!found && isTrack && round < 5/);
-  assert.match(main, /if \(!clickSafely\(loadMoreLink\(\)\)\) break;/);
+  assert.match(main, /const link = loadMoreLink\(\);\s*if \(!clickSafely\(link\)\) \{/);
   assert.match(main, /function safeClick\(name\) \{\s*const selector = SAFE_CLICKS\[name\];\s*return clickSafely\(/);
 });
 
@@ -266,6 +268,15 @@ test('сообщение клиента для «Ответить» или «Ц�
   const branch = /if \(!found\) \{([\s\S]*?)\n {6}\}/.exec(main)?.[1] || '';
   assert.match(branch, /return \{\s*ok: false,\s*error: /, 'ненайденная цель — ошибка, а не вставка');
   assert.doesNotMatch(branch, /applied = 'plain'/, 'часть не превращается в обычное сообщение');
-  // Ошибка уходит в панель предупреждением, часть остаётся текущей.
-  assert.match(code('reply-content.js'), /if \(!event\.data\.ok\) \{\s*setStatus\(event\.data\.error \|\| 'Не получилось подготовить часть', 'warn'\);\s*return;/);
+  // Ошибка уходит в панель предупреждением, часть остаётся текущей; конец допечатки прежней части его не стирает.
+  assert.match(code('reply-content.js'), /if \(!event\.data\.ok\) \{\s*const warning = \{ text: event\.data\.error \|\| 'Не получилось подготовить часть', tone: 'warn' \};\s*if \(typingFor\) typingFor\.done = warning;\s*setStatus\(warning\.text, warning\.tone\);\s*return;/);
+  // Прежняя часть ещё печаталась — дописывается целиком: при отказе в поле не остаётся обрывка.
+  assert.match(main, /\n {4}finishTyping\(\);\n\n {4}ensureTrackForm\(\);/);
+  // Подсказка по причине: история не догрузилась, ссылки догрузки нет на месте, сообщения правда нет.
+  assert.match(main, /const \{ found, reason \} = onlyIf \? \{ found: findMessage\(\{ key, target \}\), reason: null \} : await findMessageLoading\(\{ key, target \}\);/);
+  assert.match(main, /reason = 'stalled';/);
+  assert.match(main, /if \(\/Показаны \\d\+ последних\/\.test\(trackList\(\)\?\.\$el\?\.textContent \|\| ''\)\) reason = 'hidden';/);
+  assert.match(main, /error: missingText\(onlyIf, reason\)/);
+  // Автоподмена на /inbox не обещает догрузку, которой там нет.
+  assert.match(main, /function missingText\(onlyIf, reason\) \{[\s\S]*?isTrack \? 'Нажмите «Подготовить часть», панель догрузит переписку' : 'Прокрутите переписку выше/);
 });
