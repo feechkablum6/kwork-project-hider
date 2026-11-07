@@ -30,6 +30,7 @@ function runLive({ pathname = '/inbox/client', response = null, maxTrackId = 100
     return chain;
   };
   const document = {
+    documentElement: { dataset: {} },
     visibilityState: 'visible',
     querySelector: (selector) => (selector === '.conversation-messages-list' ? { __vue__: conversation } : null),
     addEventListener: (type, fn) => { listeners[type] = fn; },
@@ -169,4 +170,14 @@ test('нового трека нет — страница заказа не пе
 test('на прочих страницах Kwork опрос не ставится', () => {
   assert.equal(runLive({ pathname: '/projects' }).installed, false);
   assert.equal(runLive({ pathname: '/inbox' }).installed, true);
+});
+
+test('Kwork заблокировал доступ (капча) — опрос вкладки молчит до конца паузы', () => {
+  const page = runLive();
+  page.document.documentElement.dataset.kphBlockedUntil = String(1_000_000 + 60_000);
+  page.tick();
+  page.tick();
+  assert.equal(page.calls.restore, 0);
+  page.tick();
+  assert.equal(page.calls.restore, 1);
 });

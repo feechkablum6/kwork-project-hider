@@ -485,7 +485,7 @@ async function downloadProjectFile(projectId, item) {
     return false;
   }
 
-  const response = await fetch(item.url, { credentials: 'include' });
+  const response = await kworkFetch(item.url, { credentials: 'include' });
   if (!response.ok) {
     return false;
   }
@@ -560,6 +560,7 @@ const ALARM_MIN_GAP_MS = 20 * 1000;
 const PULL_DEBOUNCE_MS = 300;
 const PULL_RETRY_MIN_MS = 5 * 1000;
 const PULL_RETRY_MAX_MS = 60 * 1000;
+const PULL_STABLE_MS = 60 * 1000;
 let pullUrl = null;
 let pullSocket = null;
 let pullRetryMs = PULL_RETRY_MIN_MS;
@@ -626,12 +627,74 @@ function storageSet(area, values) {
   });
 }
 
+// За частые запросы Kwork уводит на капчу (not_access.php): пока блок не снят, фон на сайт
+// не ходит — каждый запрос его держит. Снимает блок обычная страница Kwork во вкладке
+// (keepalive-content.js) или первый прошедший запрос после паузы; пауза — как после отказа
+// (`syncPauseMs`): 2 минуты, подряд вдвое дольше, до 10 — Kwork может снять блок и сам.
+const KWORK_BLOCK_STREAK_KEY = 'kworkBlockStreak';
+const KWORK_BLOCKED_TEXT = 'Kwork закрыл доступ за частые запросы: откройте kwork.ru и пройдите проверку «Я не робот»';
+
+function kworkBlockedError() {
+  return Object.assign(new Error(KWORK_BLOCKED_TEXT), { kworkBlocked: true });
+}
+
+async function kworkBlockedUntil() {
+  return Number(await storageGet('local', core.KWORK_BLOCK_KEY)) || 0;
+}
+
+async function kworkFetch(url, init = {}) {
+  const blockedUntil = await kworkBlockedUntil();
+  if (Date.now() < blockedUntil) {
+    throw kworkBlockedError();
+  }
+
+  const response = await fetch(url, { credentials: 'include', ...init });
+  if (core.isKworkBlockedUrl(response.url)) {
+    // Параллельные запросы ловят одну блокировку: срок и счёт ставит только первый.
+    if (Date.now() >= await kworkBlockedUntil()) {
+      const streak = Number(await storageGet('local', KWORK_BLOCK_STREAK_KEY)) || 0;
+      await storageSet('local', {
+        [core.KWORK_BLOCK_KEY]: Date.now() + core.syncPauseMs(streak),
+        [KWORK_BLOCK_STREAK_KEY]: streak + 1,
+      });
+    }
+
+    throw kworkBlockedError();
+  }
+
+  if (blockedUntil) {
+    chrome.storage.local.remove(core.KWORK_BLOCK_KEY, () => void chrome.runtime.lastError);
+  }
+
+  return response;
+}
+
+// Значок расширения показывает блокировку, иначе её не видно: вкладка Kwork открыта давно.
+function showKworkBlock(until) {
+  const blocked = Date.now() < (Number(until) || 0);
+  chrome.action.setBadgeText({ text: blocked ? '!' : '' });
+  chrome.action.setBadgeBackgroundColor({ color: '#d93025' });
+  chrome.action.setTitle({ title: blocked ? KWORK_BLOCKED_TEXT : chrome.runtime.getManifest().action.default_title });
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes[core.KWORK_BLOCK_KEY]) {
+    const until = changes[core.KWORK_BLOCK_KEY].newValue;
+    showKworkBlock(until);
+    // Доступ вернулся (вкладка или прошедший запрос сняли блок) — следующая блокировка снова с 2 минут.
+    if (!until) {
+      chrome.storage.local.remove(KWORK_BLOCK_STREAK_KEY, () => void chrome.runtime.lastError);
+    }
+  }
+});
+kworkBlockedUntil().then(showKworkBlock);
+
 function pause(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function postKworkForm(url, params) {
-  const response = await fetch(new URL(url, KWORK_ORIGIN).toString(), {
+  const response = await kworkFetch(new URL(url, KWORK_ORIGIN).toString(), {
     method: 'POST',
     credentials: 'include',
     headers: {
@@ -673,7 +736,7 @@ async function fetchAttachment(item) {
     return null;
   }
 
-  const response = await fetch(url, { credentials: 'include' });
+  const response = await kworkFetch(url, { credentials: 'include' });
   // Временный отказ — не беда файла: попытку не тратим, проход отдыхает.
   if (response.status === 429 || response.status >= 500) {
     const error = new Error(`Kwork ответил ${response.status}`);
@@ -753,7 +816,9 @@ async function syncAttachments(dialogKey, fileRetries) {
       const bytes = await fetchAttachment(item);
       ok = Boolean(bytes) && await saveAttachmentBytes(dialogKey, item.file, bytes);
     } catch (error) {
-      if (error?.status === 429 || error?.status >= 500) {
+      // Отказ или блокировка Kwork — не беда файла: попытку не тратим, проход отдыхает.
+      // «Failed to fetch» сюда не относится: так падает и файл с хоста без разрешения.
+      if (error?.kworkBlocked || error?.status === 429 || error?.status >= 500) {
         syncStopped = true;
         break;
       }
@@ -877,7 +942,7 @@ async function syncDialogQuiet(item, quietMids, fileRetries, { files: withFiles 
 // Отправленные отклики видны только на бирже: страница «Мои предложения»
 // несёт их готовым списком. По нему агент сверяет, ушёл ли отклик и по какой цене.
 async function syncOffers() {
-  const response = await fetch(`${KWORK_ORIGIN}/offers`, { credentials: 'include' });
+  const response = await kworkFetch(`${KWORK_ORIGIN}/offers`, { credentials: 'include' });
   if (!response.ok) {
     const error = new Error(`/offers вернул ${response.status}`);
     error.status = response.status;
@@ -912,7 +977,7 @@ const ordersNext = new Set();
 let ordersAll = false;
 
 async function fetchOrderTracks(orderId) {
-  const response = await fetch(`${KWORK_ORIGIN}/get_track_limit?id=${encodeURIComponent(orderId)}`, {
+  const response = await kworkFetch(`${KWORK_ORIGIN}/get_track_limit?id=${encodeURIComponent(orderId)}`, {
     method: 'POST',
     credentials: 'include',
     headers: {
@@ -934,7 +999,7 @@ async function fetchOrderTracks(orderId) {
 }
 
 async function fetchManageOrders(tab) {
-  const response = await fetch(`${KWORK_ORIGIN}/get_manage_orders?limit=20${tab ? `&s=${encodeURIComponent(tab)}` : ''}`, {
+  const response = await kworkFetch(`${KWORK_ORIGIN}/get_manage_orders?limit=20${tab ? `&s=${encodeURIComponent(tab)}` : ''}`, {
     credentials: 'include',
     headers: { 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json, text/javascript, */*; q=0.01' },
   });
@@ -1048,7 +1113,7 @@ async function recheckOpenOffers() {
   const open = await request({ command: 'open-offers' });
   const offers = Array.isArray(open?.dialogs) ? open.dialogs : [];
   if (offers.length === 0) return;
-  const response = await fetch(`${KWORK_ORIGIN}/inbox`, { credentials: 'include' });
+  const response = await kworkFetch(`${KWORK_ORIGIN}/inbox`, { credentials: 'include' });
   if (!response.ok) {
     const error = new Error(`/inbox вернул ${response.status}`);
     error.status = response.status;
@@ -1155,7 +1220,7 @@ async function syncInbox() {
       return;
     }
 
-    const response = await fetch(`${KWORK_ORIGIN}/inbox`, { credentials: 'include' });
+    const response = await kworkFetch(`${KWORK_ORIGIN}/inbox`, { credentials: 'include' });
     if (!response.ok) {
       if (response.status === 429 || response.status >= 500) {
         await pauseSync();
@@ -1398,6 +1463,7 @@ async function syncInbox() {
 
     // Пауза ставится после всех этапов: отказ может прийти и на обходе файлов.
     const pauseMinutes = Math.round(core.syncPauseMs(times.pauseStreak) / 60000);
+    const blocked = Date.now() < await kworkBlockedUntil();
     if (syncStopped) {
       // От конца прохода, а не от `now`: долгий проход иначе ставит паузу в прошлое.
       times.pausedUntil = Date.now() + core.syncPauseMs(times.pauseStreak);
@@ -1416,7 +1482,7 @@ async function syncInbox() {
     const heldKeys = held.map((item) => item.key.toLowerCase());
     await reportSync({
       ok: pendingKeys.length === 0 && !syncStopped,
-      error: syncStopped ? `Kwork попросил подождать, пауза ${pauseMinutes} мин` : pendingKeys.length > 0 ? `не дочитаны: ${pendingKeys.join(', ')}` : null,
+      error: syncStopped ? (blocked ? KWORK_BLOCKED_TEXT : `Kwork попросил подождать, пауза ${pauseMinutes} мин`) : pendingKeys.length > 0 ? `не дочитаны: ${pendingKeys.join(', ')}` : null,
       held: heldKeys,
       dialogs: chatList.length,
       changed: savedKeys,
@@ -1534,10 +1600,15 @@ function connectPull(url) {
   }
 
   pullSocket = socket;
+  let openedAt = 0;
   socket.onopen = () => {
-    pullRetryMs = PULL_RETRY_MIN_MS;
-    // Пока канал молчал, сообщения могли прийти: один проход сверяет.
-    syncFromPull(null);
+    openedAt = Date.now();
+    // Пока канал молчал, сообщения могли прийти: один проход сверяет. Только пройденный
+    // недавно проход его заменяет: канал, рвущийся сразу после открытия, иначе гонял бы
+    // полный проход раз в 5 секунд (лишняя нагрузка — Kwork за неё закрывает доступ).
+    if (Date.now() - lastPassEndedAt >= ALARM_MIN_GAP_MS) {
+      syncFromPull(null);
+    }
   };
   socket.onmessage = (event) => {
     const frame = core.parsePullFrame(event.data);
@@ -1560,6 +1631,12 @@ function connectPull(url) {
   socket.onclose = () => {
     if (pullSocket === socket) {
       pullSocket = null;
+      // Пауза до повтора сбрасывается только после канала, который продержался: рвущийся
+      // сразу переподключается всё реже, до минуты.
+      if (openedAt && Date.now() - openedAt >= PULL_STABLE_MS) {
+        pullRetryMs = PULL_RETRY_MIN_MS;
+      }
+
       schedulePullRetry();
     }
   };

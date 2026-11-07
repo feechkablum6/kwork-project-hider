@@ -240,7 +240,7 @@ test('файлы заказа качает фоновый скрипт, а ст�
   const background = fs.readFileSync(path.join(projectRoot, 'src/background.js'), 'utf8');
   const pageScript = fs.readFileSync(path.join(projectRoot, 'src/project-content.js'), 'utf8');
 
-  assert.match(background, /function downloadProjectFile[\s\S]{0,200}fetch\(item\.url/);
+  assert.match(background, /function downloadProjectFile[\s\S]{0,200}kworkFetch\(item\.url/);
   assert.doesNotMatch(pageScript, /arrayBuffer/);
 });
 

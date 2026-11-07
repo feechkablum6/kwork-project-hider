@@ -107,7 +107,9 @@
   function tick() {
     watchChannel();
     const now = Date.now();
-    if (busy || document.visibilityState !== 'visible' || now - lastAt < MIN_GAP_MS || now - liveAt < LIVE_QUIET_MS) {
+    // Kwork закрыл доступ за частые запросы (капча): вкладка молчит, пока пауза не кончится.
+    const blockedUntil = Number(document.documentElement.dataset.kphBlockedUntil) || 0;
+    if (busy || now < blockedUntil || document.visibilityState !== 'visible' || now - lastAt < MIN_GAP_MS || now - liveAt < LIVE_QUIET_MS) {
       return;
     }
 

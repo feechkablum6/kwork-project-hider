@@ -520,3 +520,36 @@ test('непрочитанное клиента первым в ответе —
   assert.equal(parsed.clientUnread, true);
   assert.equal(parsed.maxMid, null);
 });
+
+test('блокировка Kwork за частые запросы — переход на not_access.php; она останавливает проход, как отказ', () => {
+  assert.equal(core.isKworkBlockedUrl('https://kwork.ru/not_access.php'), true);
+  assert.equal(core.isKworkBlockedUrl('https://kwork.ru/not_access.php?return=%2Finbox'), true);
+  assert.equal(core.isKworkBlockedUrl('https://kwork.ru/inbox'), false);
+  assert.equal(core.isKworkBlockedUrl('https://kwork.ru/projects?q=not_access'), false);
+  assert.equal(core.isKworkBlockedUrl(undefined), false);
+  assert.equal(core.isKworkRefusal(Object.assign(new Error('x'), { kworkBlocked: true })), true);
+  assert.equal(core.KWORK_BLOCK_KEY, 'kworkBlockedUntil');
+});
+
+test('все запросы фонового скрипта к Kwork идут через kworkFetch: он узнаёт блокировку и держит паузу', () => {
+  const background = require('node:fs').readFileSync(require('node:path').resolve(__dirname, '../src/background.js'), 'utf8');
+  const calls = background.match(/(?<![\w.])fetch\(/g) || [];
+  assert.equal(calls.length, 1);
+  const start = background.indexOf('async function kworkFetch(');
+  assert.ok(start > 0);
+  assert.match(background.slice(start, start + 900), /(?<![\w.])fetch\(/);
+  // Повторная блокировка подряд — проверка доступа реже, как пауза после отказа (syncPauseMs).
+  assert.match(background.slice(start, start + 900), /core\.syncPauseMs\(streak\)/);
+  // Параллельные запросы ловят одну блокировку: счёт растёт один раз.
+  assert.match(background.slice(start, start + 900), /Date\.now\(\) >= await kworkBlockedUntil\(\)/);
+});
+
+test('блокировка Kwork на обходе файлов останавливает проход и не тратит попытки файлов', () => {
+  const background = require('node:fs').readFileSync(require('node:path').resolve(__dirname, '../src/background.js'), 'utf8');
+  const start = background.indexOf('async function syncAttachments(');
+  assert.ok(start > 0);
+  assert.match(background.slice(start, start + 2500), /catch \(error\) \{[^}]{0,200}?if \(error\?\.kworkBlocked \|\| error\?\.status === 429 \|\| error\?\.status >= 500\) \{\s*syncStopped = true;\s*break;/);
+  // «Failed to fetch» у файла бывает и от хоста без разрешения (journal: корзина kwork-track) —
+  // это беда файла: тратит попытку, а не останавливает обход навсегда.
+  assert.doesNotMatch(background.slice(start, start + 2500), /isKworkRefusal\(error\)/);
+});

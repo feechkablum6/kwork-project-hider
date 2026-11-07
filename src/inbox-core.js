@@ -1095,7 +1095,16 @@
   // Отказ биржи или обрыв сети останавливает весь проход; прочие ошибки
   // (разбор ответа, мост) касаются одного диалога.
   function isKworkRefusal(error) {
+    if (error?.kworkBlocked) return true;
     return error?.status !== undefined ? isFatalHistoryError(error) : error instanceof TypeError;
+  }
+
+  // За частые запросы Kwork уводит на страницу с капчей Яндекса (07.11.2026): пока доступ
+  // не вернулся, расширение молчит — каждый запрос держит блокировку.
+  const KWORK_BLOCK_KEY = 'kworkBlockedUntil';
+
+  function isKworkBlockedUrl(url) {
+    return /^https:\/\/(?:www\.)?kwork\.ru\/not_access(?:\.php)?(?:[?#]|$)/.test(String(url || ''));
   }
 
   // Пауза автосохранения после отказа биржи: первый отказ — 2 минуты (10 минут
@@ -1683,6 +1692,8 @@
     isFatalHistoryError,
     isKworkRefusal,
     syncPauseMs,
+    KWORK_BLOCK_KEY,
+    isKworkBlockedUrl,
     looksLikeMessage,
     mergeMessages,
     needsFullHistory,

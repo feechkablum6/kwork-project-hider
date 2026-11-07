@@ -3,16 +3,27 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const core = require('../src/inbox-core.js');
 
 const DEAD = 'Could not establish connection. Receiving end does not exist.';
 const keepalive = fs.readFileSync(path.resolve(__dirname, '../src/keepalive-content.js'), 'utf8');
 const restartPage = fs.readFileSync(path.resolve(__dirname, '../src/restart.js'), 'utf8');
 
-function runKeepalive({ body = true } = {}) {
+function runKeepalive({ body = true, href = 'https://kwork.ru/inbox', store = {}, now = 1_000_000 } = {}) {
   const frames = [];
   let tick = null;
   let ready = null;
-  const chrome = { runtime: { id: 'ext', getURL: (file) => `chrome-extension://ext/${file}` } };
+  const changed = [];
+  const chrome = {
+    runtime: { id: 'ext', getURL: (file) => `chrome-extension://ext/${file}` },
+    storage: {
+      local: {
+        set: (values) => { Object.assign(store, values); },
+        remove: (key) => { delete store[key]; },
+      },
+      onChanged: { addListener: (fn) => changed.push(fn) },
+    },
+  };
   const element = () => {
     const frame = { style: {}, src: '', removed: false, remove() { frame.removed = true; } };
     return frame;
@@ -20,11 +31,19 @@ function runKeepalive({ body = true } = {}) {
   const document = {
     createElement: element,
     body: body ? { append: (frame) => frames.push(frame) } : null,
-    documentElement: { append: (frame) => frames.push(frame) },
+    documentElement: { append: (frame) => frames.push(frame), dataset: {} },
     addEventListener: (type, fn) => { ready = fn; },
   };
-  vm.runInNewContext(keepalive, { chrome, document, setInterval: (fn) => { tick = fn; return 1; } });
-  return { chrome, document, frames, tick: () => tick(), ready: () => ready() };
+  vm.runInNewContext(keepalive, {
+    chrome,
+    document,
+    location: { href },
+    KworkInboxCore: core,
+    Date: { now: () => now },
+    setInterval: (fn) => { tick = fn; return 1; },
+  });
+  const change = (changes, area = 'local') => changed.forEach((fn) => fn(changes, area));
+  return { chrome, document, frames, store, change, tick: () => tick(), ready: () => ready() };
 }
 
 test('страница Kwork сразу и раз в минуту подгружает скрытую служебную страницу, прошлую рамку убирает', () => {
@@ -114,4 +133,27 @@ test('фоновый скрипт отвечает на проверку стр�
   const listener = background.indexOf('chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {');
   assert.ok(listener > 0);
   assert.match(background.slice(listener, listener + 300), /if \(message\?\.type === 'kph-ping'\) \{\s*sendResponse\(\{ ok: true \}\);\s*return false;/);
+});
+
+test('страница блокировки Kwork (капча за частые запросы) ставит расширению паузу, как отказ биржи', () => {
+  const page = runKeepalive({ href: 'https://kwork.ru/not_access.php', now: T });
+  assert.equal(page.store.kworkBlockedUntil, T + core.syncPauseMs(0));
+});
+
+test('обычная страница Kwork открылась — доступ вернулся, пауза снимается', () => {
+  const page = runKeepalive({ href: 'https://kwork.ru/inbox/ivan', store: { kworkBlockedUntil: T + 60_000 }, now: T });
+  assert.equal('kworkBlockedUntil' in page.store, false);
+});
+
+test('пауза из-за блокировки видна открытой вкладке (опросу в MAIN world) и снимается вместе с ней', () => {
+  const page = runKeepalive();
+  const { dataset } = page.document.documentElement;
+  assert.equal(dataset.kphBlockedUntil, undefined);
+  page.change({ kworkBlockedUntil: { newValue: T + 60_000 } });
+  assert.equal(dataset.kphBlockedUntil, String(T + 60_000));
+  page.change({ other: { newValue: 1 } });
+  page.change({ kworkBlockedUntil: { newValue: T } }, 'session');
+  assert.equal(dataset.kphBlockedUntil, String(T + 60_000));
+  page.change({ kworkBlockedUntil: { oldValue: T + 60_000 } });
+  assert.equal(dataset.kphBlockedUntil, undefined);
 });

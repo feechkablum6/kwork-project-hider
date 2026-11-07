@@ -20,3 +20,27 @@
   else document.addEventListener('DOMContentLoaded', check, { once: true });
   setInterval(check, CHECK_MS);
 })();
+
+// За частые запросы Kwork уводит на страницу с капчей (not_access.php): расширение замолкает
+// (пауза как после отказа биржи, дальше её растит фоновый скрипт), фон и вкладки узнают об этом
+// через chrome.storage. Открылась обычная страница Kwork — доступ вернулся, пауза снимается.
+(() => {
+  const core = globalThis.KworkInboxCore;
+  const key = core.KWORK_BLOCK_KEY;
+  if (core.isKworkBlockedUrl(location.href)) {
+    chrome.storage.local.set({ [key]: Date.now() + core.syncPauseMs(0) });
+  } else {
+    chrome.storage.local.remove(key);
+  }
+
+  // Опрос вкладки (live-main.js) живёт в MAIN world без chrome.storage: срок паузы ему — атрибутом.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes[key]) {
+      return;
+    }
+
+    const until = changes[key].newValue;
+    if (until) document.documentElement.dataset.kphBlockedUntil = String(until);
+    else delete document.documentElement.dataset.kphBlockedUntil;
+  });
+})();
