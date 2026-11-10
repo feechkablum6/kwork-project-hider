@@ -317,6 +317,8 @@
   // Последний текст, который панель печатала в поле: written — уже набранное,
   // active — печать идёт. Остановленная печать остаётся «своим» текстом поля.
   let typing = null;
+  // Во сколько раз паузы набора длиннее обычных: слайдер панели меняет и посреди набора.
+  let slower = 1;
   const SEND_BUTTON = '.js-box-submit, .message-submit-button';
 
   function fieldEditor() {
@@ -349,7 +351,7 @@
       for (const [length, delay] of steps) {
         // В скрытой вкладке Chrome будит таймеры раз в секунду и реже: печать растянулась бы на минуты.
         if (document.hidden) finishTyping();
-        else await wait(delay);
+        else await wait(delay * slower);
         if (!run.active) break;
         if (window.location.href !== run.href || !sameText(editorText(), run.written)) {
           run.active = false;
@@ -633,6 +635,11 @@
     if (event.source !== window || event.data?.source !== COMMAND_SOURCE) return;
     if (event.data.kind === 'stop-typing') {
       if (typing) typing.active = false;
+      return;
+    }
+
+    if (event.data.kind === 'typing-speed') {
+      slower = Math.min(5, Math.max(0.2, Number(event.data.slower) || 1));
       return;
     }
 

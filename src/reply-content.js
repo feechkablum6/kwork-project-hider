@@ -474,10 +474,11 @@
     range.max = reply.TYPING_SPEED.max;
     range.step = reply.TYPING_SPEED.step;
     range.value = speed;
-    // Без перерисовки панели: она оборвала бы перетаскивание. Действует со следующей вставки.
+    // Без перерисовки панели: она оборвала бы перетаскивание. Идущий набор меняет темп сразу.
     range.addEventListener('input', () => {
       speed = reply.typingSpeed(range.value);
       speedText.textContent = `Скорость набора: ${speed} зн./мин`;
+      sendSpeed();
     });
     range.addEventListener('change', () => storageSet({ [SPEED_KEY]: speed }));
     speedBox.append(speedText, range);
@@ -507,6 +508,10 @@
 
   function trimSkips(all) {
     return Object.fromEntries(Object.entries(all).slice(-30));
+  }
+
+  function sendSpeed() {
+    window.postMessage({ source: COMMAND_SOURCE, kind: 'typing-speed', slower: reply.TYPING_SPEED.base / speed }, window.location.origin);
   }
 
   // Пропущенную или скрытую часть панель не допечатывает.
@@ -549,7 +554,7 @@
       text: part.text,
       fields: part.fields || null,
       // По кнопке текст набирается по знаку: клиент видит «печатает».
-      steps: onlyIf ? null : reply.typingSteps(part.text, Math.random, speed),
+      steps: onlyIf ? null : reply.typingSteps(part.text),
       force: forced,
       // Свой текст прошлого черновика в поле — тоже не пользовательский: заменяется сразу.
       known: [...draft.parts.filter((item) => ['reply', 'quote', 'plain'].includes(item.mode)).map((item) => item.text), ...(last ? [last.text] : [])],
@@ -697,6 +702,7 @@
     inserted = stored[INSERTED_KEY] && typeof stored[INSERTED_KEY] === 'object' ? stored[INSERTED_KEY] : {};
     collapsed = stored[COLLAPSED_KEY] === true;
     speed = reply.typingSpeed(stored[SPEED_KEY]);
+    sendSpeed();
     loadDraft();
     pollTimer = setInterval(poll, POLL_MS);
     document.addEventListener('visibilitychange', poll);
