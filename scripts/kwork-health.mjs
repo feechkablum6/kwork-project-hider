@@ -214,14 +214,22 @@ async function trial() {
   const where = paths();
   const startedAt = Date.now();
   const { slug, dirs, file } = prepareTrial(where);
-  const clean = async () => {
-    const left = await cleanupTrial(where, { slug, dirs, file });
-    if (left.length > 0) console.log(`        в Claude Desktop остались проверочные чаты: ${left.join(', ')} — уберите их в архив или удалите, остальное убрано`);
+  // Уборка одна на пробу: повторный сигнал и finally ждут её же, а не начинают вторую.
+  let cleaning = null;
+  const clean = () => {
+    cleaning ??= cleanupTrial(where, { slug, dirs, file }).then((left) => {
+      if (left.length > 0) console.log(`        в Claude Desktop остались проверочные чаты: ${left.join(', ')} — уберите их в архив или удалите, остальное убрано`);
+    });
+    return cleaning;
   };
-  // Прервали (Ctrl-C, таймаут запуска) — finally не выполнится: убираем по сигналу.
-  const stop = () => clean().finally(() => process.exit(130));
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
+  // Прервали (Ctrl-C, таймаут запуска) — finally не выполнится: убираем по сигналу. Обработчик постоянный:
+  // Ctrl-C под npm приходит дважды (от терминала и пересылкой npm), второй сигнал убил бы уборку.
+  const stop = () => {
+    if (!cleaning) console.log('        прервано — убираю за пробой, до двух минут');
+    clean().finally(() => process.exit(130));
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
   try {
     return await runTrial(where, slug, dirs, startedAt);
   } finally {
