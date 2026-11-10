@@ -301,12 +301,18 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
   // salt — у пересланной побудки те же сообщения, но номер другой: диспетчер не примет его за копию.
   function trackPending(state, slug, news, salt = '') {
     const previous = state.pending[slug];
-    if (previous?.key === news.key) return previous;
+    if (previous?.key === news.key) {
+      previous.since ??= now();
+      return previous;
+    }
+
     state.pending[slug] = {
       wakeId: shortId(`${slug}:${news.key}${salt}`),
       key: news.key,
       lastId: news.lastId,
       attempts: 0,
+      // С какого времени диалог ждёт побудки: по нему живая проверка видит застрявшую.
+      since: previous?.since ?? now(),
       nextAt: previous?.sent ? previous.nextAt : now(),
       ...(previous?.sent ? { sent: previous.sent } : {}),
     };
@@ -808,16 +814,17 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
     log(`побудка ${slug} не удалась (попытка ${item.attempts}): ${item.error}`);
   }
 
+  // → true: такт пройден владельцем замка (по нему живая проверка видит, что будильщик работает).
   async function tick() {
     if (running) {
-      return;
+      return false;
     }
 
     running = true;
     try {
       if (!owner) {
         owner = acquireLock(lockPath);
-        if (!owner) return;
+        if (!owner) return false;
       }
 
       const state = loadState();
@@ -825,7 +832,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
         baseline(state);
         writeAtomic(statePath, state);
         fs.rmSync(dirtyDir, { recursive: true, force: true });
-        return;
+        return true;
       }
 
       if (state.version < STATE_VERSION) {
@@ -838,6 +845,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       lastTickAt = now();
       if (gap > SLEEP_GAP_MS) {
         for (const item of Object.values(state.pending)) {
+          if (item.since) item.since += gap;
           if (!item.sent) continue;
           item.sent.at += gap;
           if (item.sent.busyAt) item.sent.busyAt += gap;
@@ -863,6 +871,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       }
 
       writeAtomic(statePath, state);
+      return true;
     } finally {
       running = false;
     }

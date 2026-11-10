@@ -16,10 +16,50 @@
     (document.body || document.documentElement).append(frame);
   }
 
+  // Расширение перезагрузилось — скрипты этой страницы осиротели (скрытие, виджеты, сохранение молчат), а новые
+  // Chrome в открытую вкладку не ставит: страница обновляется сама. Начатое не теряем: вкладку с любым изменённым
+  // полем оставляем, её назовёт живая проверка. Страницы с панелью черновика решает reply-content.js
+  // (цитата, карусель файлов, плашка) — здесь их не трогаем.
+  const REPLY_PAGE = /^\/(?:(?:new_)?inbox\/[^/]+|track)/;
+  let idle = 0;
+
+  function changed() {
+    return [...document.querySelectorAll('input, textarea, select, [contenteditable=""], [contenteditable="true"]')].some((field) => {
+      if (field.type === 'hidden') return false;
+      if (field.files?.length > 0) return true;
+      if (field.type === 'checkbox' || field.type === 'radio') return field.checked !== field.defaultChecked;
+      if (field.options) {
+        const preset = [...field.options].findIndex((option) => option.defaultSelected);
+        return field.selectedIndex !== Math.max(preset, 0);
+      }
+
+      if ('value' in field) return String(field.value ?? '').trim() !== String(field.defaultValue ?? '').trim();
+      return String(field.textContent ?? '').trim() !== '';
+    });
+  }
+
+  function tick() {
+    if (!chrome.runtime?.id && !REPLY_PAGE.test(location.pathname)) {
+      // Пусто на двух проверках подряд: первая могла застать человека за секунду до ввода.
+      idle = changed() ? 0 : idle + 1;
+      if (idle >= 2) {
+        location.reload();
+        return;
+      }
+    }
+
+    check();
+  }
+
   if (document.body) check();
   else document.addEventListener('DOMContentLoaded', check, { once: true });
-  setInterval(check, CHECK_MS);
+  setInterval(tick, CHECK_MS);
 })();
+
+// Живая проверка цепочки побудки: фоновый скрипт спрашивает, работает ли во вкладке скрипт его версии.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'kph-health') sendResponse({ version: chrome.runtime.getManifest().version });
+});
 
 // За частые запросы Kwork уводит на страницу с капчей (not_access.php): расширение замолкает
 // (пауза как после отказа биржи, дальше её растит фоновый скрипт), фон и вкладки узнают об этом

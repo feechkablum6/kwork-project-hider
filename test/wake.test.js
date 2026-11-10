@@ -1012,3 +1012,23 @@ test('команда пересылки оставляет заявку буди
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('такт владельца замка возвращает true (пульс будильщика); побудка помнит, с какого времени ждёт', async () => {
+  let clock = Date.parse('2026-11-10T10:00:00Z');
+  const world = createWorld({ now: () => clock });
+  world.save([message(1, 0, 'me', 'жду')]);
+  assert.equal(await world.waker.tick(), true);
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'первое')]);
+  assert.equal(await world.waker.tick(), true);
+  const since = world.stateOf().pending.ivan.since;
+  assert.equal(since, clock);
+  // Мак спал час: время сна в ожидание не засчитывается.
+  clock += 60 * 60 * 1000;
+  await world.waker.tick();
+  assert.equal(world.stateOf().pending.ivan.since, since + 60 * 60 * 1000);
+
+  // Замок держит чужой живой процесс — такта нет, пульса тоже.
+  const locked = createWorld();
+  fs.writeFileSync(path.join(locked.targetDir, 'data', 'wake.lock'), String(process.ppid));
+  assert.equal(await locked.waker.tick(), false);
+});

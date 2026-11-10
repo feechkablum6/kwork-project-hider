@@ -8,6 +8,7 @@ const { encodeFrame, decodeFrames } = require('./frames.js');
 const { handleCommand } = require('./store.js');
 const { createSyncWake } = require('./sync-wake.js');
 const { createWaker } = require('./waker.js');
+const { createHealthBeat } = require('./health.js');
 const { createClaudeRunner } = require('./claude-runner.js');
 
 const CONFIG_PATH = path.join(__dirname, 'bridge-config.json');
@@ -16,6 +17,7 @@ const LOG_PATH = path.join(__dirname, 'bridge.log');
 let buffer = Buffer.alloc(0);
 let syncWake = null;
 let waker = null;
+let healthBeat = null;
 
 function log(line) {
   try {
@@ -64,11 +66,18 @@ function startSyncWake() {
     serviceDir: path.join(readDirs().targetDir, 'data'),
     send: respond,
   });
+  healthBeat = createHealthBeat({ serviceDir: path.join(readDirs().targetDir, 'data'), send: respond });
   const timer = setInterval(() => {
     try {
       syncWake.tick();
     } catch (error) {
       log(`заявки агентов: ${error?.message || error}`);
+    }
+
+    try {
+      healthBeat.tick();
+    } catch (error) {
+      log(`пульс проверки: ${error?.message || error}`);
     }
   }, WAKE_TICK_MS);
   // Таймер не держит мост: закрылся порт — процесс выходит, как раньше.
@@ -88,7 +97,7 @@ function startSyncWake() {
 const WAKER_TICK_MS = 2000;
 
 function runWaker() {
-  waker?.tick().catch((error) => log(`будильщик: ${error?.message || error}`));
+  waker?.tick().then((done) => done && healthBeat?.wakerDone()).catch((error) => log(`будильщик: ${error?.message || error}`));
 }
 
 function processMessage(message) {
@@ -98,6 +107,17 @@ function processMessage(message) {
       startSyncWake();
     } catch (error) {
       log(`заявки агентов не слушаются: ${error?.message || error}`);
+    }
+
+    return;
+  }
+
+  // Отчёт расширения о вкладках и канале — для живой проверки (health.js); ответа не ждут.
+  if (message?.command === 'save-health') {
+    try {
+      healthBeat?.save(message.health || {});
+    } catch (error) {
+      log(`отчёт расширения не записан: ${error?.message || error}`);
     }
 
     return;

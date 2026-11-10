@@ -42,6 +42,11 @@ function getPort() {
       return;
     }
 
+    if (response?.push === 'health') {
+      reportHealth();
+      return;
+    }
+
     const pending = response?.id ? pendingRequests.get(response.id) : null;
     if (pending) {
       pendingRequests.delete(response.id);
@@ -165,6 +170,39 @@ function sendToTab(tabId, payload) {
       resolve(response || null);
     });
   });
+}
+
+// Отчёт для живой проверки цепочки побудки (native_host/health.js): в каждой открытой вкладке Kwork и
+// YouGile спрашивается скрипт расширения. Молчит — вкладка открыта до установки или обновления и осталась
+// без скрипта (05.11.2026 так перестали сохраняться входящие YouGile); спящая вкладка — не сбой.
+const HEALTH_TAB_URLS = ['https://kwork.ru/*', 'https://yougile.com/*', 'https://*.yougile.com/*'];
+const HEALTH_ANSWER_MS = 2000;
+
+async function reportHealth() {
+  try {
+    const version = chrome.runtime.getManifest().version;
+    const found = await new Promise((resolve) => {
+      chrome.tabs.query({ url: HEALTH_TAB_URLS }, (tabs) => {
+        void chrome.runtime.lastError;
+        resolve(tabs || []);
+      });
+    });
+    const tabs = await Promise.all(found.map(async (tab) => {
+      const url = new URL(tab.url);
+      const row = { site: url.hostname.endsWith('yougile.com') ? 'yougile' : 'kwork', path: `${url.hostname}${url.pathname}` };
+      if (tab.discarded || tab.status !== 'complete') return { ...row, state: 'sleep' };
+      const answer = await Promise.race([
+        sendToTab(tab.id, { type: 'kph-health' }),
+        new Promise((resolve) => setTimeout(() => resolve(null), HEALTH_ANSWER_MS)),
+      ]);
+      return { ...row, state: answer?.version === version ? 'ok' : 'silent' };
+    }));
+    const seen = await storageGet('local', PULL_SEEN_KEY) || {};
+    const pullAt = Object.values(seen).map((item) => item?.at).filter(Boolean).sort().pop() || null;
+    getPort().postMessage({ command: 'save-health', health: { version, tabs, pullAt, blockedUntil: await kworkBlockedUntil() } });
+  } catch {
+    // Отчёта нет — живая проверка увидит это по его возрасту.
+  }
 }
 
 const crawlQueue = { keys: [], done: 0, total: 0, messages: 0, skipped: [], error: null, tabId: null, active: false };
@@ -1680,6 +1718,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === SYNC_ALARM) {
     // Мост держится открытым портом: через него приходят заявки агентов.
     getPort();
+    reportHealth();
     // Проход по заявке агента только что был — будильник его не повторяет.
     if (Date.now() - lastPassEndedAt >= ALARM_MIN_GAP_MS) {
       syncInbox();

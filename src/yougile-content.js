@@ -9,6 +9,11 @@
   const yougile = globalThis.KphYougileCore;
   if (!reply || !yougile || window.top !== window || !globalThis.chrome?.runtime?.sendMessage) return;
 
+  // Живая проверка цепочки побудки: фоновый скрипт спрашивает, работает ли во вкладке скрипт его версии.
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === 'kph-health') sendResponse({ version: chrome.runtime.getManifest().version });
+  });
+
   const MAIN_SOURCE = 'kph-yougile-main';
   const COMMAND_SOURCE = 'kph-yougile-panel';
   const SKIPS_KEY = 'replyPanelSkips';

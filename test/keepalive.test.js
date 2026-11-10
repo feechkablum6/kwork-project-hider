@@ -9,13 +9,15 @@ const DEAD = 'Could not establish connection. Receiving end does not exist.';
 const keepalive = fs.readFileSync(path.resolve(__dirname, '../src/keepalive-content.js'), 'utf8');
 const restartPage = fs.readFileSync(path.resolve(__dirname, '../src/restart.js'), 'utf8');
 
-function runKeepalive({ body = true, href = 'https://kwork.ru/inbox', store = {}, now = 1_000_000 } = {}) {
+function runKeepalive({ body = true, href = 'https://kwork.ru/inbox', store = {}, now = 1_000_000, fields = [] } = {}) {
+  let reloads = 0;
   const frames = [];
   let tick = null;
   let ready = null;
   const changed = [];
+  let health = null;
   const chrome = {
-    runtime: { id: 'ext', getURL: (file) => `chrome-extension://ext/${file}` },
+    runtime: { id: 'ext', getURL: (file) => `chrome-extension://ext/${file}`, getManifest: () => ({ version: '9.9.9' }), onMessage: { addListener: (fn) => { health = fn; } } },
     storage: {
       local: {
         set: (values) => { Object.assign(store, values); },
@@ -30,6 +32,7 @@ function runKeepalive({ body = true, href = 'https://kwork.ru/inbox', store = {}
   };
   const document = {
     createElement: element,
+    querySelectorAll: () => fields,
     body: body ? { append: (frame) => frames.push(frame) } : null,
     documentElement: { append: (frame) => frames.push(frame), dataset: {} },
     addEventListener: (type, fn) => { ready = fn; },
@@ -37,13 +40,13 @@ function runKeepalive({ body = true, href = 'https://kwork.ru/inbox', store = {}
   vm.runInNewContext(keepalive, {
     chrome,
     document,
-    location: { href },
+    location: { href, pathname: href.replace(/^https?:\/\/[^/]+/, ''), reload: () => { reloads += 1; } },
     KworkInboxCore: core,
     Date: { now: () => now },
     setInterval: (fn) => { tick = fn; return 1; },
   });
   const change = (changes, area = 'local') => changed.forEach((fn) => fn(changes, area));
-  return { chrome, document, frames, store, change, tick: () => tick(), ready: () => ready() };
+  return { chrome, document, frames, store, change, tick: () => tick(), ready: () => ready(), reloads: () => reloads, health: (message) => { let answer = null; health(message, {}, (value) => { answer = value; }); return answer; } };
 }
 
 test('страница Kwork сразу и раз в минуту подгружает скрытую служебную страницу, прошлую рамку убирает', () => {
@@ -156,4 +159,46 @@ test('пауза из-за блокировки видна открытой вк
   assert.equal(dataset.kphBlockedUntil, String(T + 60_000));
   page.change({ kworkBlockedUntil: { oldValue: T + 60_000 } });
   assert.equal(dataset.kphBlockedUntil, undefined);
+});
+
+test('вкладка отвечает живой проверке версией своего скрипта, на чужие сообщения молчит', () => {
+  const page = runKeepalive();
+  assert.equal(page.health({ type: 'kph-health' }).version, '9.9.9');
+  assert.equal(page.health({ type: 'other' }), null);
+});
+
+test('расширение перезагрузилось: нетронутая страница обновляется сама на второй проверке, начатая — нет', () => {
+  const untouched = [{ value: '  ', defaultValue: '' }, { textContent: '' }, { files: [] }, { type: 'hidden', value: 'x', defaultValue: '' },
+    { value: '500', defaultValue: '500' }, { type: 'checkbox', checked: true, defaultChecked: true }, { options: [{}, { defaultSelected: true }], selectedIndex: 1 }, { options: [{}, {}], selectedIndex: 0 }];
+  const empty = runKeepalive({ href: 'https://kwork.ru/projects', fields: untouched });
+  empty.tick();
+  assert.equal(empty.reloads(), 0);
+  delete empty.chrome.runtime.id;
+  empty.tick();
+  assert.equal(empty.reloads(), 0);
+  empty.tick();
+  assert.equal(empty.reloads(), 1);
+
+  const started = [{ value: 'отклик', defaultValue: '' }, { textContent: 'черновик' }, { files: [{}] }, { type: 'number', value: '1500', defaultValue: '' },
+    { type: 'checkbox', checked: true, defaultChecked: false }, { type: 'radio', checked: false, defaultChecked: true }, { options: [{}, {}], selectedIndex: 1 }];
+  for (const field of started) {
+    const page = runKeepalive({ href: 'https://kwork.ru/projects', fields: [field] });
+    delete page.chrome.runtime.id;
+    page.tick();
+    page.tick();
+    page.tick();
+    assert.equal(page.reloads(), 0, JSON.stringify(field));
+    assert.equal(page.frames.length, 4);
+  }
+});
+
+test('страницы с панелью черновика (переписка, заказ) сиротой здесь не обновляются — решает reply-content', () => {
+  for (const href of ['https://kwork.ru/inbox/ivan', 'https://kwork.ru/new_inbox/ivan', 'https://kwork.ru/track?id=1']) {
+    const page = runKeepalive({ href });
+    delete page.chrome.runtime.id;
+    page.tick();
+    page.tick();
+    page.tick();
+    assert.equal(page.reloads(), 0, href);
+  }
 });
