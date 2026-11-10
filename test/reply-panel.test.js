@@ -214,7 +214,7 @@ test('по кнопке текст печатается по знаку и Kwork
   const main = code('reply-main.js');
   const content = code('reply-content.js');
   // Подмена по новому черновику — сразу, по кнопке — шагами из ядра.
-  assert.match(content, /steps: onlyIf \? null : reply\.typingSteps\(part\.text\)/);
+  assert.match(content, /steps: onlyIf \? null : reply\.typingSteps\(part\.text, Math\.random, speed\)/);
   assert.match(main, /if \(onlyIf \|\| !steps\?\.length\)/);
   // Сигнал «печатает» — собственный обработчик Kwork, без клавиш.
   assert.match(main, /window\.pullIsTypeMessage/);

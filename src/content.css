@@ -659,6 +659,27 @@ html[data-kph-feed-rendering='true'] .project-list .preloader__ico {
   line-height: 16px;
 }
 
+.kph-draft__speed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--kph-ink-soft);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
+}
+
+.kph-draft__speed-text {
+  min-width: 190px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kph-draft__speed-range {
+  width: 140px;
+  accent-color: var(--kph-green-hover);
+}
+
 .kph-draft__status--ok {
   color: var(--kph-green-deep);
 }

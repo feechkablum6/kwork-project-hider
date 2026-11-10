@@ -17,6 +17,7 @@
   const SKIPS_KEY = 'replyPanelSkips';
   const COLLAPSED_KEY = 'replyPanelCollapsed';
   const INSERTED_KEY = 'replyPanelInserted';
+  const SPEED_KEY = 'replyTypingSpeed';
   const POLL_MS = 4000;
   const FORCE_WINDOW_MS = 15000;
   const HIGHLIGHT_NAME = 'kph-draft-quote';
@@ -26,6 +27,7 @@
   let progress = null;
   let skips = {};
   let collapsed = false;
+  let speed = reply.TYPING_SPEED.base;
   let panel = null;
   let signature = '';
   let pending = null;
@@ -464,6 +466,23 @@
       actions.append(prepare, skip);
     }
 
+    const speedBox = element('label', 'kph-draft__speed');
+    const speedText = element('span', 'kph-draft__speed-text', `Скорость набора: ${speed} зн./мин`);
+    const range = element('input', 'kph-draft__speed-range');
+    range.type = 'range';
+    range.min = reply.TYPING_SPEED.min;
+    range.max = reply.TYPING_SPEED.max;
+    range.step = reply.TYPING_SPEED.step;
+    range.value = speed;
+    // Без перерисовки панели: она оборвала бы перетаскивание. Действует со следующей вставки.
+    range.addEventListener('input', () => {
+      speed = reply.typingSpeed(range.value);
+      speedText.textContent = `Скорость набора: ${speed} зн./мин`;
+    });
+    range.addEventListener('change', () => storageSet({ [SPEED_KEY]: speed }));
+    speedBox.append(speedText, range);
+    actions.append(speedBox);
+
     const live = element('span', `kph-draft__status${status.tone ? ` kph-draft__status--${status.tone}` : ''}`, status.text);
     live.setAttribute('role', 'status');
     live.setAttribute('aria-live', 'polite');
@@ -530,7 +549,7 @@
       text: part.text,
       fields: part.fields || null,
       // По кнопке текст набирается по знаку: клиент видит «печатает».
-      steps: onlyIf ? null : reply.typingSteps(part.text),
+      steps: onlyIf ? null : reply.typingSteps(part.text, Math.random, speed),
       force: forced,
       // Свой текст прошлого черновика в поле — тоже не пользовательский: заменяется сразу.
       known: [...draft.parts.filter((item) => ['reply', 'quote', 'plain'].includes(item.mode)).map((item) => item.text), ...(last ? [last.text] : [])],
@@ -673,10 +692,11 @@
   }
 
   async function start() {
-    const stored = await storageGet([SKIPS_KEY, COLLAPSED_KEY, INSERTED_KEY]);
+    const stored = await storageGet([SKIPS_KEY, COLLAPSED_KEY, INSERTED_KEY, SPEED_KEY]);
     skips = stored[SKIPS_KEY] && typeof stored[SKIPS_KEY] === 'object' ? stored[SKIPS_KEY] : {};
     inserted = stored[INSERTED_KEY] && typeof stored[INSERTED_KEY] === 'object' ? stored[INSERTED_KEY] : {};
     collapsed = stored[COLLAPSED_KEY] === true;
+    speed = reply.typingSpeed(stored[SPEED_KEY]);
     loadDraft();
     pollTimer = setInterval(poll, POLL_MS);
     document.addEventListener('visibilitychange', poll);

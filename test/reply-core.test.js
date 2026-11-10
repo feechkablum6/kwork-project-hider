@@ -134,6 +134,12 @@ test('печать «как человек»: по знаку, темп быст
   const total = reply.typingSteps(sample).reduce((sum, [, delay]) => sum + delay, 0);
   const perMinute = (sample.length / total) * 60000;
   assert.ok(perMinute > 1000 && perMinute < 1600, String(perMinute));
+  // Слайдер скорости: вдвое быстрее — паузы вдвое короче; мусор и выход за границы — в пределы.
+  const sum = (speed) => reply.typingSteps(sample, () => 0.5, speed).reduce((acc, [, delay]) => acc + delay, 0);
+  assert.ok(Math.abs(sum(2600) / sum(1300) - 0.5) < 0.02);
+  assert.equal(reply.typingSpeed(undefined), 1300);
+  assert.equal(reply.typingSpeed(50), 300);
+  assert.equal(reply.typingSpeed(99999), 3000);
 });
 
 test('страница потеряла связь с расширением: пусто в полях — обновляется сама, набран текст или файл — только подсказка; обновление не чаще раза в минуту', () => {

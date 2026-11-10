@@ -299,8 +299,17 @@
   }
 
   // Набор «как человек» для поля Kwork: [длина набранного, пауза перед знаком в мс].
-  // Около 1300 знаков в минуту, после пробела, знака препинания и переноса — дольше.
-  function typingSteps(text, random = Math.random) {
+  // Около 1300 знаков в минуту (слайдер панели меняет), после пробела, знака препинания и переноса — дольше.
+  const TYPING_SPEED = { min: 300, max: 3000, step: 100, base: 1300 };
+
+  function typingSpeed(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return TYPING_SPEED.base;
+    return Math.min(TYPING_SPEED.max, Math.max(TYPING_SPEED.min, Math.round(number)));
+  }
+
+  function typingSteps(text, random = Math.random, perMinute = TYPING_SPEED.base) {
+    const slower = TYPING_SPEED.base / typingSpeed(perMinute);
     const steps = [];
     let length = 0;
     let previous = '';
@@ -310,7 +319,7 @@
       else if (/[.,!?;:]/.test(previous)) delay += 50 + random() * 60;
       else if (previous === ' ') delay += random() * 30;
       length += char.length;
-      steps.push([length, Math.round(delay)]);
+      steps.push([length, Math.round(delay * slower)]);
       previous = char;
     }
 
@@ -495,6 +504,8 @@
     snapOptionPrice,
     snapPrice,
     typingSteps,
+    typingSpeed,
+    TYPING_SPEED,
     withPageMessages,
   };
 });
