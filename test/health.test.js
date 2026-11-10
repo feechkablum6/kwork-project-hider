@@ -5,6 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const health = require('../native_host/health.js');
+const { projectSlug } = require('../native_host/claude-runner.js');
 
 const NOW = Date.parse('2026-11-10T10:00:00Z');
 const ago = (ms) => new Date(NOW - ms).toISOString();
@@ -114,4 +115,67 @@ test('мост: пульс раз в 10 с, заявка проверки — о
   assert.equal(report.version, '1.33.0');
   assert.equal(report.at, new Date(now).toISOString());
   fs.rmSync(serviceDir, { recursive: true, force: true });
+});
+
+test('пробная побудка убирает за собой: папки заказов, строки списка, переписку, журналы чатов; чужое не трогает', async () => {
+  const { cleanupTrial, prepareTrial } = await import('../scripts/kwork-health.mjs');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-trial-'));
+  const kworkRoot = path.join(home, 'Kwork');
+  const targetDir = path.join(kworkRoot, 'переписки');
+  const projectsDir = path.join(home, 'projects');
+  const where = { targetDir, kworkRoot, serviceDir: path.join(targetDir, 'data') };
+  const mapPath = path.join(kworkRoot, 'docs', 'заказы-клиенты.md');
+  fs.mkdirSync(path.dirname(mapPath), { recursive: true });
+  fs.mkdirSync(path.join(kworkRoot, 'Активные', 'shop'), { recursive: true });
+  fs.mkdirSync(path.join(targetDir, 'ivan'), { recursive: true });
+  fs.writeFileSync(mapPath, '# Заказы\n\n- shop: ivan (выкладка: да)\n');
+
+  // Остатки прерванной пробы: папка, её журнал, строка, старая переписка.
+  const stale = path.join(kworkRoot, 'Активные', 'kph-proverka-a-old1');
+  fs.mkdirSync(stale, { recursive: true });
+  fs.mkdirSync(path.join(projectsDir, projectSlug(stale)), { recursive: true });
+  fs.mkdirSync(path.join(targetDir, 'kph-selftest'), { recursive: true });
+  fs.writeFileSync(path.join(targetDir, 'kph-selftest', 'данные.json'), JSON.stringify({ messages: [{ id: 'старое' }] }));
+  fs.appendFileSync(mapPath, '- kph-proverka-a-old1: kph-selftest (выкладка: нет)\nне строка заказа\n');
+
+  const trial = prepareTrial(where, projectsDir);
+  assert.equal(fs.existsSync(stale), false);
+  assert.deepEqual(fs.readdirSync(projectsDir), []);
+  assert.doesNotMatch(fs.readFileSync(mapPath, 'utf8'), /old1/);
+  assert.equal(JSON.parse(fs.readFileSync(trial.file, 'utf8')).messages.length, 1);
+  assert.match(fs.readFileSync(mapPath, 'utf8'), /kph-proverka-a-[a-z0-9]+: kph-selftest \(выкладка: нет\)/);
+  for (const dir of trial.dirs) fs.mkdirSync(path.join(projectsDir, projectSlug(dir)), { recursive: true });
+
+  // Диспетчер убрал в архив один чат из двух: второй назван, остальное убрано.
+  let chats = new Map(trial.dirs.map((dir, index) => [`cli-${index}`, { localId: `local_${index}`, cwd: dir, title: path.basename(dir) }]));
+  chats.set('disp', { localId: 'local_disp', cwd: home });
+  fs.writeFileSync(path.join(where.serviceDir, 'dispatcher.json'), JSON.stringify({ localId: 'local_disp' }));
+  const sent = [];
+  // Будильщик снимает побудку на третьей паузе: до этого уборка файлы не трогает.
+  fs.writeFileSync(path.join(where.serviceDir, 'wake-state.json'), JSON.stringify({ pending: { 'kph-selftest': {} } }));
+  let pauses = 0;
+  const pause = async () => {
+    pauses += 1;
+    if (pauses === 3) {
+      assert.equal(fs.existsSync(trial.dirs[0]), true);
+      fs.writeFileSync(path.join(where.serviceDir, 'wake-state.json'), '{}');
+      fs.rmSync(path.join(where.serviceDir, 'wake-dirty'), { recursive: true });
+    }
+  };
+  const runner = {
+    desktopChats: () => chats,
+    openChat: () => ({ pid: 1 }),
+    deliver: async (open, text) => {
+      sent.push(text);
+      chats.get('cli-0').archived = true;
+    },
+  };
+  const left = await cleanupTrial(where, trial, { runner, projectsDir, pause });
+  assert.deepEqual(sent, ['[Kwork-диспетчер] убрать проверочные чаты\nубрать: local_0\nубрать: local_1']);
+  assert.match(left.join(), /^kph-proverka-b-[a-z0-9]+$/);
+  assert.equal(fs.readFileSync(mapPath, 'utf8'), '# Заказы\n\n- shop: ivan (выкладка: да)\nне строка заказа\n');
+  assert.deepEqual(fs.readdirSync(path.join(kworkRoot, 'Активные')), ['shop']);
+  assert.deepEqual(fs.readdirSync(targetDir).sort(), ['data', 'ivan']);
+  assert.deepEqual(fs.readdirSync(projectsDir), []);
+  fs.rmSync(home, { recursive: true, force: true });
 });

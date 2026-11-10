@@ -11,7 +11,7 @@
 - `npm test` — полный набор тестов.
 - `npm run sync-core` — пересоздание копий ядра для изолированного мира после правок `src/core.js` или `src/inbox-core.js`.
 - `npm run chat -- <ссылка>` — печать сохранённой переписки с клиентом.
-- `npm run health` — живая проверка цепочки побудки по звеньям («живо / мертво»); `-- --wake` — с пробной побудкой проверочного клиента `kph-selftest` (два заказа `kph-proverka-a|b`), `-- --install-watch` — включить сторожа.
+- `npm run health` — живая проверка цепочки побудки по звеньям («живо / мертво»); `-- --wake` — с пробной побудкой проверочного клиента `kph-selftest` (два заказа `kph-proverka-a|b-<метка>`; после себя убирает папки, строки списка заказов и переписку, чаты — в архив Desktop через диспетчера), `-- --install-watch` — включить сторожа.
 - `npm version patch|minor` — новая версия сразу в `package.json` и `manifest.json`.
 - `install.bat` (Windows) или `install.command` (macOS) — установка моста, который пишет переписки и заказы на диск.
 - `powershell -ExecutionPolicy Bypass -File .\scripts\generate-icons.ps1` — пересоздание иконок.

@@ -2,16 +2,17 @@
 //   node scripts/kwork-health.mjs          — звенья «живо / мертво» и общий итог (код выхода 1, если что-то мертво)
 //   node scripts/kwork-health.mjs --wake   — ещё и пробная побудка: проверочное сообщение (не от клиента и не
 //                                            клиенту) доходит до чата проверочного заказа, затем пересылается
-//                                            во второй заказ того же «клиента»
+//                                            во второй заказ того же «клиента»; после себя убирает всё
+//                                            (папки, строки списка заказов, переписку; чаты — в архив Desktop)
 //   node scripts/kwork-health.mjs --watch  — сторож (LaunchAgent, раз в 5 минут): мёртвое звено — одно
 //                                            уведомление macOS, пока не оживёт
 // Правка цепочки побудки сдаётся только после зелёного `--wake` (docs/do-not.md).
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { projectRoot, readJson, resolveChatsDir } from './kwork-shared.mjs';
@@ -22,13 +23,20 @@ const reroute = require('../native_host/reroute.js');
 const wakeCore = require('../native_host/wake-core.js');
 const { WAKE_DIRTY_DIR } = require('../native_host/store.js');
 const core = require('../src/inbox-core.js');
-const { createClaudeRunner } = require('../native_host/claude-runner.js');
+const { createClaudeRunner, projectSlug } = require('../native_host/claude-runner.js');
 
 const HOST_MANIFEST = join(homedir(), 'Library', 'Application Support', 'Google', 'Chrome', 'NativeMessagingHosts', 'ru.kwork.hider.host.json');
 const REPORT_WAIT_MS = 12 * 1000;
 const TRIAL_NICK = 'kph-selftest';
-const TRIAL_ORDERS = ['kph-proverka-a', 'kph-proverka-b'];
+// Имена заказов — свои на каждый запуск: чат прошлой пробы лежит в архиве Desktop, и новая в него не попадает.
+const TRIAL_PREFIX = 'kph-proverka-';
+const TRIAL_ORDER = /^kph-proverka-[ab](?:-[a-z0-9]+)?$/;
+const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 const TRIAL_LEG_MS = 4 * 60 * 1000;
+const CHAT_REMOVE_MS = 90 * 1000;
+// Команда диспетчеру (dispatcher/CLAUDE.md): убрать чаты проверочных заказов в архив Claude Desktop
+// (удаление чата Desktop всегда спрашивает пользователя, архив — нет).
+const DISPATCHER_REMOVE = '[Kwork-диспетчер] убрать проверочные чаты';
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
@@ -150,30 +158,27 @@ async function watch() {
 // Пробная побудка. «Клиент» kph-selftest с двумя проверочными заказами: сообщение ложится в переписку так же,
 // как его кладёт мост, будильщик ведёт его обычным путём (выбор заказа, сокет или диспетчер, метка в журнале
 // чата), затем агентская пересылка уводит его во второй заказ. На Kwork ничего не уходит: такого клиента нет.
-function prepareTrial({ targetDir, kworkRoot }) {
-  const dirs = TRIAL_ORDERS.map((name) => join(kworkRoot, wakeCore.ACTIVE_DIR, name));
+function prepareTrial({ targetDir, kworkRoot }, projectsDir = PROJECTS_DIR) {
+  // Прерванная проба (Ctrl-C, таймаут) уборку не прошла: её папки увели бы новую побудку в старый заказ.
+  sweepTrial({ targetDir, kworkRoot }, projectsDir);
+  const stamp = Date.now().toString(36);
+  const orders = ['a', 'b'].map((letter) => `${TRIAL_PREFIX}${letter}-${stamp}`);
+  const dirs = orders.map((name) => join(kworkRoot, wakeCore.ACTIVE_DIR, name));
   for (const dir of dirs) {
     mkdirSync(dir, { recursive: true });
-    const rules = join(dir, 'CLAUDE.md');
-    if (!existsSync(rules)) {
-      writeFileSync(rules, `# Проверка побудки\n\nСлужебная папка живой проверки цепочки побудки (kwork-project-hider, \`npm run health -- --wake\`). Клиента ${TRIAL_NICK} не существует.\n\nНа любое сообщение \`[Kwork-побудка …]\` ответь одной строкой «проверка получена». Ничего не читай, не запускай и не пиши: ни черновиков, ни файлов, ни команд, ни вопросов.\n`);
-    }
+    writeFileSync(join(dir, 'CLAUDE.md'), `# Проверка побудки\n\nСлужебная папка живой проверки цепочки побудки (kwork-project-hider, \`npm run health -- --wake\`). Клиента ${TRIAL_NICK} не существует.\n\nНа любое сообщение \`[Kwork-побудка …]\` ответь одной строкой «проверка получена». Ничего не читай, не запускай и не пиши: ни черновиков, ни файлов, ни команд, ни вопросов.\n`);
   }
 
   const mapPath = join(kworkRoot, 'docs', 'заказы-клиенты.md');
   const map = readFileSync(mapPath, 'utf8');
-  const missing = TRIAL_ORDERS.filter((name) => !wakeCore.parseOrderMap(map)[name]);
-  if (missing.length > 0) {
-    writeFileSync(mapPath, `${map.replace(/\n*$/, '\n')}${missing.map((name) => `- ${name}: ${TRIAL_NICK} (выкладка: нет)\n`).join('')}`);
-  }
+  writeFileSync(mapPath, `${map.replace(/\n*$/, '\n')}${orders.map((name) => `- ${name}: ${TRIAL_NICK} (выкладка: нет)\n`).join('')}`);
 
   const slug = core.buildDialogSlug(TRIAL_NICK);
   const file = join(targetDir, slug, core.DIALOG_DATA_NAME);
-  const previous = readJson(file)?.messages || [];
   const now = new Date();
   const message = { id: String(now.getTime()), authorName: TRIAL_NICK, time: now.toISOString(), text: 'ПРОВЕРКА ЦЕПОЧКИ ПОБУДКИ. Это не клиент: сообщение создала команда живой проверки. Ответь одной строкой «проверка получена» и ничего не делай.' };
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify({ key: TRIAL_NICK, messages: [...previous.slice(-4), message] }, null, 2));
+  writeFileSync(file, JSON.stringify({ key: TRIAL_NICK, messages: [message] }, null, 2));
   markDirty(targetDir, slug);
   return { slug, dirs, file };
 }
@@ -193,7 +198,7 @@ async function waitDelivered({ serviceDir }, slug, since, wanted) {
     const entry = (state.delivered?.[slug] || []).find((item) => item.at >= since && (!wanted || item.key === wanted));
     const log = readFileSync(logPath).subarray(logFrom).toString('utf8').split('\n').filter((line) => line.includes(`побудка ${slug}`));
     if (entry) return { entry, log, seconds: Math.round((entry.at - since) / 1000) };
-    if (!hinted && log.some((line) => /уведомление|ссылка на чат/.test(line))) {
+    if (!hinted && log.some((line) => /уведомление/.test(line))) {
       hinted = true;
       console.log('        чата проверочного заказа ещё нет в Claude Desktop: откройте его из уведомления «Kwork: новый чат» — проверка ждёт');
     }
@@ -209,14 +214,84 @@ async function trial() {
   const where = paths();
   const startedAt = Date.now();
   const { slug, dirs, file } = prepareTrial(where);
+  const clean = async () => {
+    const left = await cleanupTrial(where, { slug, dirs, file });
+    if (left.length > 0) console.log(`        в Claude Desktop остались проверочные чаты: ${left.join(', ')} — уберите их в архив или удалите, остальное убрано`);
+  };
+  // Прервали (Ctrl-C, таймаут запуска) — finally не выполнится: убираем по сигналу.
+  const stop = () => clean().finally(() => process.exit(130));
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
   try {
     return await runTrial(where, slug, dirs, startedAt);
   } finally {
-    // Следов не оставляем: пустая переписка снимает недошедшую побудку (иначе будильщик слал бы ссылки и
-    // служебные просьбы в чаты заказов) и «клиент ждёт ответа» в сводке агентов.
-    writeFileSync(file, JSON.stringify({ key: TRIAL_NICK, messages: [] }, null, 2));
-    markDirty(where.targetDir, slug);
+    await clean();
+    process.off('SIGINT', stop);
+    process.off('SIGTERM', stop);
   }
+}
+
+// Файлы пробы: папки проверочных заказов (и прошлых прерванных проб), журналы их чатов, строки списка
+// заказов, переписка проверочного клиента. Удаляется только своё — по точным именам.
+function sweepTrial({ targetDir, kworkRoot }, projectsDir) {
+  const mapPath = join(kworkRoot, 'docs', 'заказы-клиенты.md');
+  const map = readFileSync(mapPath, 'utf8');
+  const kept = map.split('\n').filter((line) => !wakeCore.parseOrderLine(line)?.order.startsWith(TRIAL_PREFIX)).join('\n');
+  if (kept !== map) writeFileSync(mapPath, kept);
+  const active = join(kworkRoot, wakeCore.ACTIVE_DIR);
+  for (const name of existsSync(active) ? readdirSync(active) : []) {
+    if (!TRIAL_ORDER.test(name)) continue;
+    rmSync(join(active, name), { recursive: true, force: true });
+  }
+
+  // Журналы чатов: имя папки — путь заказа, где всё, кроме латиницы и цифр, заменено дефисом.
+  const journals = new RegExp(`^${projectSlug(active)}-+kph-proverka-[ab](?:-[a-z0-9]+)?$`);
+  for (const name of existsSync(projectsDir) ? readdirSync(projectsDir) : []) {
+    if (journals.test(name)) rmSync(join(projectsDir, name), { recursive: true, force: true });
+  }
+
+  rmSync(join(targetDir, core.buildDialogSlug(TRIAL_NICK)), { recursive: true, force: true });
+}
+
+// Чаты проверочных заказов в списке Desktop — и этой пробы, и прошлых, которые тогда убрать не удалось.
+const trialChats = (runner) => [...runner.desktopChats().values()].filter((chat) => !chat.archived && TRIAL_ORDER.test(basename(String(chat.cwd || ''))));
+
+// Проба убирает за собой всё, что завела: побудку в пути, чаты в списке Claude Desktop (в архив), папки проверочных заказов,
+// их строки в списке заказов, переписку и журналы чатов. → названия чатов, которые убрать не удалось.
+async function cleanupTrial(where, { slug, file }, { runner = createClaudeRunner(), projectsDir = PROJECTS_DIR, pause = sleep } = {}) {
+  const pendingGone = () => {
+    const state = readJson(join(where.serviceDir, 'wake-state.json')) || {};
+    return !state.pending?.[slug] && !state.reroute?.[slug] && !existsSync(join(where.serviceDir, WAKE_DIRTY_DIR, slug));
+  };
+  // Пустая переписка снимает недошедшую побудку: иначе будильщик слал бы ссылки и служебные просьбы в чаты заказов.
+  writeFileSync(file, JSON.stringify({ key: TRIAL_NICK, messages: [] }, null, 2));
+  markDirty(where.targetDir, slug);
+  // Строки и папки убираются только после этого: такт будильщика, ещё держащий побудку, без заказов увёл бы её в корень Kwork.
+  for (let waited = 0; waited < 60000 && !pendingGone(); waited += 500) await pause(500);
+
+  // Чат из списка Desktop убирает только сам Desktop: просим диспетчера убрать его в архив.
+  let chats = trialChats(runner);
+  if (chats.length > 0) {
+    try {
+      const localId = readJson(join(where.serviceDir, 'dispatcher.json'))?.localId;
+      const found = [...runner.desktopChats()].find(([, chat]) => chat.localId === localId);
+      const open = found?.[1].cwd ? runner.openChat(found[1].cwd, found[0], false) : null;
+      if (open) {
+        // Агент проверочного чата ещё дописывает «проверка получена».
+        await pause(5000);
+        await runner.deliver(open, `${DISPATCHER_REMOVE}\n${chats.map((chat) => `убрать: ${chat.localId}`).join('\n')}`);
+        for (let waited = 0; waited < CHAT_REMOVE_MS && chats.length > 0; waited += 1000) {
+          await pause(1000);
+          chats = trialChats(runner);
+        }
+      }
+    } catch {
+      // Диспетчер не ответил — чаты назовём в выводе.
+    }
+  }
+
+  sweepTrial(where, projectsDir);
+  return chats.map((chat) => chat.title || chat.localId);
 }
 
 async function runTrial(where, slug, dirs, startedAt) {
@@ -283,6 +358,8 @@ async function main(args) {
   console.log(dead.length === 0 ? '\nИтог: цепочка побудки жива.' : `\nИтог: мёртвых звеньев — ${dead.length}. Побудка клиента сейчас может не дойти.`);
   process.exitCode = dead.length === 0 ? 0 : 1;
 }
+
+export { cleanupTrial, prepareTrial };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   await main(process.argv.slice(2));
