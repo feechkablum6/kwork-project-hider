@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Kwork — скрытие проектов",
-  "version": "1.34.1",
-  "description": "Скрывает ненужные проекты на бирже Kwork, извлекает данные заказов, показывает ближайшую выплату и сохраняет переписки с клиентами на диск, а также чаты YouGile.",
+  "version": "1.35.0",
+  "description": "Скрывает ненужные проекты на бирже Kwork, извлекает данные заказов, показывает ближайшую выплату и сохраняет переписки с клиентами на диск, а также чаты YouGile и ответы заказчиков FL.ru.",
   "permissions": [
     "storage",
     "nativeMessaging",
@@ -13,7 +13,8 @@
     "https://kwork.ru/*",
     "https://cdn-edge.kwork.ru/*",
     "https://kwork-conversation.storage.yandexcloud.net/*",
-    "https://kwork-track.storage.yandexcloud.net/*"
+    "https://kwork-track.storage.yandexcloud.net/*",
+    "https://www.fl.ru/*"
   ],
   "background": {
     "service_worker": "src/background.js"

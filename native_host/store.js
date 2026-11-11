@@ -8,6 +8,7 @@ const core = require('../src/inbox-core.js');
 const projectCore = require('../src/project-core.js');
 const wakeCore = require('./wake-core.js');
 const yougileCore = require('../src/yougile-core.js');
+const flCore = require('../src/fl-core.js');
 
 const DATA_DIR_NAME = 'data';
 const DIALOG_LIST_FILE = '_dialogs.json';
@@ -130,7 +131,9 @@ function routedYougileDialog(targetDir, dialog) {
 
 function saveDialog(targetDir, { dialog: received, sample }) {
   const yougile = received?.source === 'yougile';
-  const dialog = yougile ? routedYougileDialog(targetDir, received) : received;
+  const fl = received?.source === 'fl';
+  // Диалог FL.ru — только с ключом FL.ru («fl-<логин>»): в переписку Kwork он не пишет.
+  const dialog = yougile ? routedYougileDialog(targetDir, received) : fl && !flCore.isDialogKey(received.key) ? null : received;
   if (!dialog) {
     return { path: null, messages: 0, skipped: true };
   }
@@ -156,10 +159,21 @@ function saveDialog(targetDir, { dialog: received, sample }) {
   const markdownPath = path.join(dialogDir, core.DIALOG_MARKDOWN_NAME);
 
   const previous = readJson(jsonPath);
+  // Ник Kwork может совпасть с ключом другого источника («fl-…»): чужую переписку не дописываем.
+  const source = yougile ? 'yougile' : fl ? 'fl' : null;
+  if (previous && (previous.source || null) !== source) {
+    throw new Error(`диалог ${slug} уже записан другим источником`);
+  }
+
   const dialogContext = { dialogKey: dialog.key, clientId: dialog.clientId || previous?.clientId || null };
   // В чате YouGile участников больше двух, и ключ диалога не имя собеседника: фильтр Kwork там не нужен.
-  const merged = core.mergeMessages(previous?.messages, dialog?.messages);
-  const messages = yougile ? merged : core.filterDialogMessages(merged, dialogContext);
+  // У FL.ru участников знает сам ответ сайта (чат отклика или сделки с одним заказчиком).
+  // Событие FL.ru при повторе прохода приходит с новым «сейчас»: известное сообщение остаётся на своём
+  // месте, иначе оно уедет в конец и заслонит от будильщика то, что заказчик написал после него.
+  const knownTimes = new Map(fl ? (previous?.messages || []).map((message) => [String(message?.id), message?.time]) : []);
+  const incoming = (dialog?.messages || []).map((message) => (knownTimes.get(String(message?.id)) ? { ...message, time: knownTimes.get(String(message.id)) } : message));
+  const merged = core.mergeMessages(previous?.messages, incoming);
+  const messages = source ? merged : core.filterDialogMessages(merged, dialogContext);
   // Точка сверки — последнее сообщение, до которого история на диске сплошная. Двигает
   // её только выгрузка, подтвердившая сплошность (verified или полная история), и только
   // до конца своей пачки. Тихая запись (getnewmessages не видит сообщений заказа) и
@@ -177,6 +191,7 @@ function saveDialog(targetDir, { dialog: received, sample }) {
     clientId: dialog.clientId || previous?.clientId || null,
     // seenUntil — прочитанное в YouGile на момент первой записи чата: будильщик не будит по нему.
     ...(yougile ? { source: 'yougile', selfId: dialog.selfId || previous?.selfId || null, seenUntil: previous ? previous.seenUntil ?? null : dialog.seenUntil || null } : {}),
+    ...(fl ? { source: 'fl', selfId: dialog.selfId || previous?.selfId || null } : {}),
     historyStrategy: dialog.strategy || previous?.historyStrategy || null,
     historyComplete: dialog.complete === undefined ? previous?.historyComplete ?? null : dialog.complete,
     verifiedTime,

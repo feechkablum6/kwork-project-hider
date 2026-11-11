@@ -1,6 +1,7 @@
-importScripts('inbox-core.js');
+importScripts('inbox-core.js', 'fl-core.js');
 
 const core = globalThis.KworkInboxCore;
+const flCore = globalThis.KphFlCore;
 
 const HOST_NAME = 'ru.kwork.hider.host';
 const STATUS_KEY = 'inboxBridgeStatus';
@@ -199,7 +200,7 @@ async function reportHealth() {
     }));
     const seen = await storageGet('local', PULL_SEEN_KEY) || {};
     const pullAt = Object.values(seen).map((item) => item?.at).filter(Boolean).sort().pop() || null;
-    getPort().postMessage({ command: 'save-health', health: { version, tabs, pullAt, blockedUntil: await kworkBlockedUntil() } });
+    getPort().postMessage({ command: 'save-health', health: { version, tabs, pullAt, blockedUntil: await kworkBlockedUntil(), fl: await storageGet('local', FL_STATUS_KEY) || null } });
   } catch {
     // Отчёта нет — живая проверка увидит это по его возрасту.
   }
@@ -1704,6 +1705,57 @@ function schedulePullRetry() {
   }, delay);
 }
 
+// ---------- FL.ru ----------
+// Вторая биржа: отклики, их чаты и сделки читаются теми же запросами, что шлёт страница «Чаты»
+// (fl-core.js), без открытой вкладки — нужен только вход на fl.ru в этом Chrome. Раз в 2 минуты
+// два запроса списков; чат читается, только когда у отклика или сделки сменилась подпись.
+const FL_EVERY_MS = 2 * 60 * 1000;
+const FL_SEEN_KEY = 'flSeen';
+const FL_STATUS_KEY = 'flStatus';
+let flBusy = false;
+
+async function flJson(path) {
+  const response = await fetch(`${flCore.ORIGIN}${path}`, { credentials: 'include', headers: { Accept: 'application/json' } });
+  if (response.status === 401) {
+    throw Object.assign(new Error('нет входа на FL.ru'), { signedOut: true });
+  }
+
+  // Нет одного чата (заказ снят) — не отказ сайта: остальные читаются дальше.
+  if (response.status === 404) {
+    throw new Error('FL.ru не нашёл страницу (ответ 404)');
+  }
+
+  // Ограничение сайта (403, частые запросы, проверка, сбой) не обходим: пауза и новая попытка позже.
+  if (!response.ok || !(response.headers.get('content-type') || '').includes('json')) {
+    throw Object.assign(new Error(`FL.ru не отдал данные (ответ ${response.status})`), { pause: true });
+  }
+
+  return response.json();
+}
+
+async function saveFlDialog(dialog) {
+  const result = await request({ command: 'save-dialog', dialog });
+  // Мост молчит или сломан — проход обрывается целиком; отказал в одной записи (ключ занят перепиской
+  // другого источника) — остальные чаты идут дальше.
+  if (!result?.ok) throw Object.assign(new Error(result?.error || 'мост не записал диалог FL.ru'), { abort: !/другим источником/.test(result?.error || '') });
+}
+
+async function syncFl() {
+  if (flBusy) return;
+  flBusy = true;
+  try {
+    const now = Date.now();
+    const previous = await storageGet('local', FL_STATUS_KEY) || {};
+    if (now < (previous.pausedUntil || 0) || now - (previous.at || 0) < FL_EVERY_MS - 5000) return;
+    const stored = await storageGet('local', FL_SEEN_KEY) || null;
+    const { seen, status } = await flCore.runPass({ fetchJson: flJson, saveDialog: saveFlDialog, stored, previous, now });
+    // shortcut: подписи не чистятся (несколько откликов в день); чистить, когда счёт пойдёт на тысячи.
+    await storageSet('local', { [FL_STATUS_KEY]: status, ...(seen ? { [FL_SEEN_KEY]: seen } : {}) });
+  } finally {
+    flBusy = false;
+  }
+}
+
 function ensureSyncAlarm() {
   chrome.alarms.get(SYNC_ALARM, (alarm) => {
     void chrome.runtime.lastError;
@@ -1719,6 +1771,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // Мост держится открытым портом: через него приходят заявки агентов.
     getPort();
     reportHealth();
+    syncFl();
     // Проход по заявке агента только что был — будильник его не повторяет.
     if (Date.now() - lastPassEndedAt >= ALARM_MIN_GAP_MS) {
       syncInbox();

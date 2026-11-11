@@ -607,8 +607,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     let freshSync = null;
     if (event === 'UserPromptSubmit' || event === 'SessionStart') {
       const order = resolveOrderNicks(input);
-      // Чаты YouGile на Kwork не найти: их пишет открытая вкладка YouGile.
-      const kworkNicks = (order?.nicks || []).filter((nick) => !nick.startsWith('yougile-'));
+      // Чаты YouGile и FL.ru на Kwork не найти: их пишут вкладка YouGile и опрос FL.ru.
+      // shortcut: клиент Kwork с ником «fl-…» тоже отсеется (выгрузку попросят вручную); мешает — смотреть source записи.
+      const kworkNicks = (order?.nicks || []).filter((nick) => !nick.startsWith('yougile-') && !nick.startsWith('fl-'));
       if (kworkNicks.length > 0) {
         freshSync = await requestFreshSync(order.targetDir, kworkNicks);
       }

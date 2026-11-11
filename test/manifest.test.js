@@ -15,7 +15,7 @@ test('manifest использует MV3, хранилище, мост на ди�
 
   assert.equal(manifest.manifest_version, 3);
   assert.deepEqual(manifest.permissions, ['storage', 'nativeMessaging', 'tabs', 'alarms']);
-  assert.deepEqual(manifest.host_permissions, ['https://kwork.ru/*', 'https://cdn-edge.kwork.ru/*', 'https://kwork-conversation.storage.yandexcloud.net/*', 'https://kwork-track.storage.yandexcloud.net/*']);
+  assert.deepEqual(manifest.host_permissions, ['https://kwork.ru/*', 'https://cdn-edge.kwork.ru/*', 'https://kwork-conversation.storage.yandexcloud.net/*', 'https://kwork-track.storage.yandexcloud.net/*', 'https://www.fl.ru/*']);
   assert.equal(manifest.action.default_popup, 'src/popup.html');
   assert.equal(manifest.background.service_worker, 'src/background.js');
   assert.equal(fs.existsSync(path.join(projectRoot, 'src/background.js')), true);

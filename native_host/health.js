@@ -15,6 +15,9 @@ const BRIDGE_STALE_MS = 45 * 1000;
 const EXTENSION_STALE_MS = 3 * 60 * 1000;
 // Проход автосохранения — раз в минуту, после отказа Kwork пауза до 10 минут.
 const SYNC_STALE_MS = 15 * 60 * 1000;
+// Опрос FL.ru идёт раз в 2 минуты; один сорвавшийся запрос — не сбой.
+// Больше паузы после отказа сайта (10 мин) плюс период опроса: один отказ — не «мертво».
+const FL_STALE_MS = 15 * 60 * 1000;
 // Побудка обычно доходит за секунды; дольше — её никто не получил.
 const PENDING_STALE_MS = 10 * 60 * 1000;
 // Такт будильщика — раз в 2 с; длинный такт (отправка, ожидание сокета) — десятки секунд.
@@ -125,6 +128,16 @@ function evaluate(facts) {
         : failed ? `проход падает: ${facts.sync.error || 'ошибка без текста'}`
           : arriving ? `проход ${minutes(syncAge)} назад, ${channel}`
             : `проход не шёл ${syncAge === Infinity ? 'ни разу' : minutes(syncAge)}, ${channel}`);
+
+    // FL.ru читает опрос фонового скрипта раз в 2 минуты; звено есть, только если он хоть раз прошёл.
+    const fl = ext.fl;
+    if (fl?.okAt) {
+      const flAge = now - fl.okAt;
+      const flOk = !fl.signedOut && !fl.warn && flAge < FL_STALE_MS;
+      add('incoming-fl', 'Новые сообщения FL.ru', flOk, fl.signedOut ? 'вы вышли из FL.ru — войдите на fl.ru'
+        : fl.warn ? fl.warn
+          : flOk ? `опрос ${minutes(flAge)} назад` : `опрос не проходит ${minutes(flAge)}${fl.error ? `: ${fl.error}` : ''}`);
+    }
   }
 
   const d = facts.dispatcher || {};

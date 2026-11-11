@@ -679,7 +679,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
     if (!file) {
       const name = route.order?.name || nick;
       const id = runner.newSessionId();
-      runner.seed({ dir: route.dir, sessionId: id, name, at: now(), text: `Чат клиента ${nick} на Kwork${route.order ? ` (заказ ${route.order.name})` : ''}. Сюда приходят побудки моста, правила — ${rulesPath}.` });
+      runner.seed({ dir: route.dir, sessionId: id, name, at: now(), text: `Чат клиента ${nick} ${wakeCore.wakePlace(record)}${route.order ? ` (заказ ${route.order.name})` : ''}. Сюда приходят побудки моста, правила — ${rulesPath}.` });
       state.chats[route.key] = { sessionId: id, dir: route.dir, nick, startedAt: now() };
       writeAtomic(statePath, state);
       log(`побудка ${slug}: ${news.reason}, новый чат «${name}»${route.reason ? ` (${route.reason})` : ''}`);

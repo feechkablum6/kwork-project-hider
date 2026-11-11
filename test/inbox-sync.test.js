@@ -534,7 +534,9 @@ test('блокировка Kwork за частые запросы — перех
 test('все запросы фонового скрипта к Kwork идут через kworkFetch: он узнаёт блокировку и держит паузу', () => {
   const background = require('node:fs').readFileSync(require('node:path').resolve(__dirname, '../src/background.js'), 'utf8');
   const calls = background.match(/(?<![\w.])fetch\(/g) || [];
-  assert.equal(calls.length, 1);
+  // Второй вызов — опрос FL.ru (flJson): другой сайт, своя пауза.
+  assert.equal(calls.length, 2);
+  assert.match(background, /async function flJson\(path\) \{\n\s+const response = await fetch\(`\$\{flCore\.ORIGIN\}\$\{path\}`/);
   const start = background.indexOf('async function kworkFetch(');
   assert.ok(start > 0);
   assert.match(background.slice(start, start + 900), /(?<![\w.])fetch\(/);
