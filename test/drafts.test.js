@@ -6,6 +6,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+
+const ROOT = path.join(__dirname, '..');
 
 const load = () => import('../scripts/kwork-drafts.mjs');
 
@@ -540,6 +543,117 @@ test('черновик из частей ложится для панели на
   write('u3', 'Проверил логи, всё в порядке.');
   capture(input, options);
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).parts[0].text, 'Начинаю.');
+});
+
+test('цитата письма не со страницы заказа помечается и держит ход один раз на вопрос клиента', async () => {
+  const { capture, misplacedReason } = await load();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-drafts-'));
+  const kworkRoot = path.join(home, 'Projects', 'Kwork');
+  const targetDir = path.join(kworkRoot, 'переписки');
+  fs.mkdirSync(path.join(targetDir, 'petr'), { recursive: true });
+  fs.mkdirSync(path.join(kworkRoot, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(kworkRoot, 'docs', 'заказы-клиенты.md'), '');
+  const inbox = { id: '1', time: '2026-10-22T09:00:00.000Z', authorId: '77', authorName: 'Petr', text: 'Как сделать проще?' };
+  const other = { id: '2', time: '2026-10-22T09:02:00.000Z', authorId: '77', authorName: 'Petr', text: 'А что с парковкой?', orderId: '444' };
+  // orderId в данные.json бывает числом.
+  const inOrder = { id: '3', time: '2026-10-22T09:05:00.000Z', authorId: '77', authorName: 'Petr', text: 'Когда получится?', orderId: 555 };
+  const writeDialog = (messages) => fs.writeFileSync(path.join(targetDir, 'petr', 'данные.json'), JSON.stringify({ key: 'Petr', clientId: '77', messages }));
+  const transcript = path.join(home, 't.jsonl');
+  const write = (uuid, text) => fs.writeFileSync(transcript, [
+    { type: 'user', message: { content: '[Kwork-побудка #b1b2c3d4] Клиент Petr написал на Kwork.' } },
+    { type: 'assistant', uuid, timestamp: AT, message: { content: [{ type: 'text', text }] } },
+  ].map((item) => JSON.stringify(item)).join('\n'));
+  let panel = null;
+  const options = {
+    home, kworkRoot, targetDir, dataDir: path.join(home, 'data'), orderMapPath: path.join(kworkRoot, 'docs', 'заказы-клиенты.md'),
+    onPanelDraft: (draft) => { panel = draft; },
+  };
+  const input = { session_id: 's1', transcript_path: transcript, cwd: kworkRoot };
+  const saved = () => JSON.parse(fs.readFileSync(path.join(targetDir, 'data', 'drafts', 'petr.json'), 'utf8'));
+  const part = (head, text) => `${head}\nСообщение клиенту:\n\`\`\`\n${text}\n\`\`\``;
+  const three = [
+    part('**1. Цитировать** «Как сделать проще?»', 'Вот так.'),
+    part('**2. Ответить на** «А что с парковкой?»', 'Готово.'),
+    part('**3. Ответить на** «Когда получится?»', 'Сегодня.'),
+    part('**4. Обычным сообщением**', 'Цена 500 Р.'),
+  ].join('\n\n');
+
+  // Клиент последним писал в заказе 555: писем из лички и из заказа 444 на его странице нет.
+  writeDialog([inbox, other, inOrder]);
+  write('u1', three);
+  capture(input, options);
+  assert.deepEqual(panel.misplaced, [1, 2]);
+  assert.equal(panel.block, true);
+  assert.match(misplacedReason(panel), /часть 1, 2 цитирует письмо, которого нет на странице заказа №555/);
+  assert.deepEqual(saved().misplaced, [1, 2]);
+  assert.equal(saved().blocked, true);
+  assert.equal('block' in saved(), false);
+
+  // Перевыдал без заголовков: помеченную цитату часть не наследует, верный ответ наследует.
+  write('u2', ['Вот так.', 'Готово.', 'Сегодня.', 'Цена 500 Р.'].map((text) => part('', text).trim()).join('\n\n'));
+  capture(input, options);
+  assert.deepEqual(panel.parts.map((item) => [item.mode, item.target || null]), [
+    ['plain', null], ['plain', null], ['reply', 'Когда получится?'], ['plain', null],
+  ]);
+  assert.deepEqual(panel.misplaced, []);
+  assert.equal(panel.block, false);
+
+  // Снова та же ошибка на тот же вопрос: помечена, но второй раз ход не держим.
+  write('u3', three);
+  capture(input, options);
+  assert.deepEqual(panel.misplaced, [1, 2]);
+  assert.equal(panel.block, false);
+
+  // Тот же текст есть и на странице заказа — цитата годится.
+  writeDialog([inbox, other, inOrder, { ...inbox, id: '4', time: '2026-10-22T09:06:00.000Z', orderId: '555' }]);
+  write('u4', three);
+  capture(input, options);
+  assert.deepEqual(panel.misplaced, [2]);
+  assert.equal(panel.block, true);
+
+  // Клиент последним писал в личку: там видны все письма, проверять нечего.
+  writeDialog([other, inOrder, { ...inbox, time: '2026-10-22T09:10:00.000Z' }]);
+  write('u5', three);
+  capture(input, options);
+  assert.deepEqual(panel.misplaced, []);
+  assert.equal(panel.block, false);
+  assert.equal(misplacedReason(panel), null);
+
+  // Цитата, которой в переписке нет вовсе, ход не держит.
+  writeDialog([inbox, inOrder]);
+  write('u6', part('**1. Цитировать** «такого письма не было»', 'Да.'));
+  capture(input, options);
+  assert.deepEqual(panel.misplaced, []);
+  assert.equal(misplacedReason(null), null);
+});
+
+test('capture из командной строки держит ход за цитату не со страницы заказа даже после чужого хука', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-drafts-cli-'));
+  const kworkRoot = path.join(home, 'Projects', 'Kwork');
+  const chats = path.join(kworkRoot, 'переписки');
+  fs.mkdirSync(path.join(chats, 'petr'), { recursive: true });
+  fs.mkdirSync(path.join(kworkRoot, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(kworkRoot, 'docs', 'заказы-клиенты.md'), '');
+  fs.writeFileSync(path.join(chats, 'petr', 'данные.json'), JSON.stringify({ key: 'Petr', clientId: '77', messages: [
+    { id: '1', time: '2026-10-22T09:00:00.000Z', authorId: '77', authorName: 'Petr', text: 'Как сделать проще?' },
+    { id: '2', time: '2026-10-22T09:05:00.000Z', authorId: '77', authorName: 'Petr', text: 'Когда получится?', orderId: '555' },
+  ] }));
+  const transcript = path.join(home, 't.jsonl');
+  fs.writeFileSync(transcript, [
+    { type: 'user', message: { content: '[Kwork-побудка #b1b2c3d4] Клиент Petr написал на Kwork.' } },
+    { type: 'assistant', uuid: 'c1', timestamp: AT, message: { content: [{ type: 'text', text: '**1. Цитировать** «Как сделать проще?»\nСообщение клиенту:\n```\nВот так.\n```' }] } },
+  ].map((item) => JSON.stringify(item)).join('\n'));
+  const run = () => spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'kwork-drafts.mjs'), 'capture'], {
+    input: JSON.stringify({ session_id: 's1', transcript_path: transcript, cwd: kworkRoot, stop_hook_active: true }),
+    env: { ...process.env, HOME: home, KPH_CHATS_DIR: chats }, encoding: 'utf8',
+  });
+
+  const first = run();
+  assert.equal(first.status, 0);
+  assert.match(JSON.parse(first.stdout).reason, /часть 1 цитирует письмо, которого нет на странице заказа №555/);
+  assert.equal(JSON.parse(first.stdout).decision, 'block');
+  // Тот же ответ второй раз: молчим, ход заканчивается.
+  assert.equal(run().stdout, '');
 });
 
 test('агент поправил черновик и не повторил «Ответить на» — в панели ответ остаётся ответом', async () => {

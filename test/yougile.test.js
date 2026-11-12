@@ -255,10 +255,12 @@ test('свежесть чата YouGile — по времени записи с�
   const world = createWorld('- veb: ivan, yougile-acme-*\n');
   const key = 'yougile-acme-1a2b3c4d5e6f';
   fs.mkdirSync(path.join(world.targetDir, 'data', 'drafts'), { recursive: true });
-  fs.writeFileSync(path.join(world.targetDir, 'data', 'drafts', `${key}.json`), JSON.stringify({
-    id: 'd1', at: new Date(at(5)).toISOString(), basedOn: new Date(at(4)).toISOString(), parts: [{ n: 1, mode: 'plain', text: 'Сделаю к пятнице' }],
-  }));
+  // Свежесть чата меряется по времени записи файла, поэтому часы настоящие, а черновик датируем от них:
+  // с датой из at() сводка с 11.11.2026 считала его старше недели и молчала.
   const now = Date.now();
+  fs.writeFileSync(path.join(world.targetDir, 'data', 'drafts', `${key}.json`), JSON.stringify({
+    id: 'd1', at: new Date(now - 60_000).toISOString(), basedOn: new Date(at(4)).toISOString(), parts: [{ n: 1, mode: 'plain', text: 'Сделаю к пятнице' }],
+  }));
   const lines = () => panelDraftLines(world.targetDir, { nicks: [key], now, fresh: true }).join('\n');
   const dataPath = path.join(world.targetDir, key, 'данные.json');
 

@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync,
-  statSync, writeFileSync,
+  statSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -794,7 +794,8 @@ export function capture(input, options = {}) {
   const turn = readLastTurn(transcriptText.split('\n'));
   const { order, nicks } = context;
   try {
-    capturePanelDraft({ turn, nicks, transcriptText, sessionId: input.session_id, order, paths });
+    const panel = capturePanelDraft({ turn, nicks, transcriptText, sessionId: input.session_id, order, paths });
+    options.onPanelDraft?.(panel);
   } catch {
     // Панель — подсказка: без черновика она просто не появится.
   }
@@ -914,15 +915,43 @@ export function capturePanelDraft({ turn, nicks, transcriptText, sessionId, orde
   // черновика. Черновик чата другого заказа того же клиента — не прошлый вариант.
   const sameQuestion = previous?.slug === slug && (previous.basedOn || null) === draft.basedOn
     && Boolean(draft.session) && previous.session === draft.session;
+  const who = { clientId, dialogKey: record.key || slug, selfId: record.selfId || null };
   const sent = sameQuestion
-    ? reply.draftProgress(previous, messages, { clientId, dialogKey: record.key || slug, selfId: record.selfId || null, events: record.events || [] }).done
+    ? reply.draftProgress(previous, messages, { ...who, events: record.events || [] }).done
     : [];
-  draft.parts = reply.inheritTargets(source.parts, sameQuestion ? previous : null, sent);
+  // Цитату, которую в прошлый раз пометили как не из того места, перевыданная часть не наследует.
+  const bad = new Set((sameQuestion ? previous.misplaced || [] : []).map(Number));
+  const base = sameQuestion
+    ? { ...previous, parts: (previous.parts || []).map((part) => (bad.has(Number(part.n)) ? { ...part, mode: 'plain', target: null } : part)) }
+    : null;
+  draft.parts = reply.inheritTargets(source.parts, base, sent);
+  // Клиент писал последним в заказе — пользователь отправляет со страницы этого заказа, а там
+  // только его письма: часть с цитатой письма из лички или другого заказа панель не вставит.
+  // В личной переписке видны все письма, поэтому отправку оттуда не проверяем.
+  draft.misplaced = draft.orderId ? draft.parts.filter((part) => {
+    const found = part.target ? reply.matchingMessages(messages, part.target, who) : [];
+    return found.length > 0 && !found.some((message) => String(message?.orderId || '') === String(draft.orderId));
+  }).map((part) => part.n) : [];
+  // Ход держим один раз на вопрос клиента: о перевыданной части агент уже знает.
+  const heldBefore = Boolean(sameQuestion && previous.blocked);
+  draft.blocked = heldBefore || draft.misplaced.length > 0;
 
   mkdirSync(dir, { recursive: true });
   writeFileSync(`${file}.tmp`, JSON.stringify(draft, null, 2));
   renameSync(`${file}.tmp`, file);
-  return draft;
+  return { ...draft, block: draft.misplaced.length > 0 && !heldBefore };
+}
+
+// Причина для Stop-хука: ход не заканчивается с частью, которую панель не вставит.
+export function misplacedReason(draft) {
+  if (!draft?.misplaced?.length) {
+    return null;
+  }
+
+  const where = `на странице заказа №${draft.orderId}`;
+  return `Черновик клиенту ${draft.nick}: часть ${draft.misplaced.join(', ')} цитирует письмо, которого нет ${where}, `
+    + 'а пользователь отправляет оттуда (там клиент писал последним). Панель на Kwork такую часть не вставит. '
+    + `Перевыдай черновик целиком: эту часть дай «Обычным сообщением» с темой в первой фразе или с цитатой письма, которое есть ${where}.`;
 }
 
 function loadPending(pendingDir) {
@@ -1015,7 +1044,14 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const command = process.argv[2];
     if (command === 'capture') {
       const input = JSON.parse(readStdin() || '{}');
-      capture(input);
+      let panel = null;
+      capture(input, { onPanelDraft: (draft) => { panel = draft; } });
+      // stop_hook_active не смотрим: его ставит и чужой хук. Свой повтор отсекает panel.block.
+      const reason = panel?.block ? misplacedReason(panel) : null;
+      if (reason) {
+        writeSync(1, JSON.stringify({ decision: 'block', reason }));
+      }
+
       sync();
     } else if (command === 'sync') {
       sync();
