@@ -8,7 +8,8 @@
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
+  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync,
+  statSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -263,6 +264,30 @@ function isRealPrompt(entry) {
 
   const text = contentText(content).trim();
   return Boolean(text) && !/^<(command-|local-command|system-reminder|task-notification)/.test(text);
+}
+
+// История долгого чата перерастает предел строки Node (~512 МБ, ERR_STRING_TOO_LONG),
+// и capture молча переставал ловить черновики. Последний ход всегда в хвосте.
+// shortcut: побудка старше хвоста не видна draftNick, поднять предел, если корневой чат теряет клиента.
+const TRANSCRIPT_TAIL_BYTES = 64 * 1024 * 1024;
+
+export function readTranscriptTail(file, limit = TRANSCRIPT_TAIL_BYTES) {
+  const { size } = statSync(file);
+  if (size <= limit) {
+    return readFileSync(file, 'utf8');
+  }
+
+  const fd = openSync(file, 'r');
+  try {
+    // Лишний байт перед хвостом: если это перевод строки, первая строка хвоста целая и остаётся.
+    const buffer = Buffer.alloc(limit + 1);
+    const read = readSync(fd, buffer, 0, limit + 1, size - limit - 1);
+    const text = buffer.subarray(0, read).toString('utf8');
+    // Первая строка начата посередине — она отброшена.
+    return text.slice(text.indexOf('\n') + 1);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 // Последний ход — всё, что агент написал после настоящего сообщения пользователя:
@@ -765,7 +790,7 @@ export function capture(input, options = {}) {
     return [];
   }
 
-  const transcriptText = readFileSync(input.transcript_path, 'utf8');
+  const transcriptText = readTranscriptTail(input.transcript_path);
   const turn = readLastTurn(transcriptText.split('\n'));
   const { order, nicks } = context;
   try {

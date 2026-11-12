@@ -111,6 +111,29 @@ test('последний ход берётся после настоящего �
   assert.deepEqual(turn.replies.map((reply) => reply.uuid), ['a1', 'a2']);
 });
 
+test('из длинной истории чата читается только хвост с целыми строками', async () => {
+  const { readTranscriptTail, readLastTurn } = await load();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-tail-'));
+  const file = path.join(dir, 'chat.jsonl');
+  const old = JSON.stringify({ type: 'assistant', uuid: 'old', timestamp: AT, message: { content: [{ type: 'text', text: 'я'.repeat(500) }] } });
+  const prompt = JSON.stringify({ type: 'user', message: { content: 'напиши клиенту' } });
+  const answer = JSON.stringify({ type: 'assistant', uuid: 'new', timestamp: AT, message: { content: [{ type: 'text', text: 'Сообщение клиенту: новое' }] } });
+  fs.writeFileSync(file, `${old}\n${prompt}\n${answer}\n`);
+
+  // Файл целиком помещается — читается весь.
+  assert.equal(readTranscriptTail(file).split('\n').length, 4);
+
+  // Предел режет первую строку посередине (и посреди кириллицы): обрывок отброшен.
+  const limit = Buffer.byteLength(`${prompt}\n${answer}\n`) + 301;
+  const tail = readTranscriptTail(file, limit);
+  assert.equal(tail, `${prompt}\n${answer}\n`);
+  assert.deepEqual(readLastTurn(tail.split('\n')).replies.map((reply) => reply.uuid), ['new']);
+
+  // Предел ровно на границе строк: целая первая строка хвоста не теряется.
+  assert.equal(readTranscriptTail(file, Buffer.byteLength(`${prompt}\n${answer}\n`)), `${prompt}\n${answer}\n`);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('отправка с правками и другой ценой записывается с фактическим текстом', async () => {
   const { resolveDrafts } = await load();
   const results = resolveDrafts({
