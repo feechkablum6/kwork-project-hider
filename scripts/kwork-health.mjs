@@ -1,9 +1,9 @@
-// Живая проверка цепочки побудки: мост → расширение → вкладки → новые сообщения → диспетчер → чат заказа.
+// Живая проверка цепочки побудки: мост → расширение → вкладки → новые сообщения → T3 Code → чат заказа.
 //   node scripts/kwork-health.mjs          — звенья «живо / мертво» и общий итог (код выхода 1, если что-то мертво)
 //   node scripts/kwork-health.mjs --wake   — ещё и пробная побудка: проверочное сообщение (не от клиента и не
 //                                            клиенту) доходит до чата проверочного заказа, затем пересылается
 //                                            во второй заказ того же «клиента»; после себя убирает всё
-//                                            (папки, строки списка заказов, переписку; чаты — в архив Desktop)
+//                                            (папки, строки списка заказов, переписку; проекты и чаты — в T3 Code)
 //   node scripts/kwork-health.mjs --watch  — сторож (LaunchAgent, раз в 5 минут): мёртвое звено — одно
 //                                            уведомление macOS, пока не оживёт
 // Правка цепочки побудки сдаётся только после зелёного `--wake` (docs/do-not.md).
@@ -24,11 +24,12 @@ const wakeCore = require('../native_host/wake-core.js');
 const { WAKE_DIRTY_DIR } = require('../native_host/store.js');
 const core = require('../src/inbox-core.js');
 const { createClaudeRunner, projectSlug } = require('../native_host/claude-runner.js');
+const { createT3Runner } = require('../native_host/t3-runner.js');
 
 const HOST_MANIFEST = join(homedir(), 'Library', 'Application Support', 'Google', 'Chrome', 'NativeMessagingHosts', 'ru.kwork.hider.host.json');
 const REPORT_WAIT_MS = 12 * 1000;
 const TRIAL_NICK = 'kph-selftest';
-// Имена заказов — свои на каждый запуск: чат прошлой пробы лежит в архиве Desktop, и новая в него не попадает.
+// Имена заказов — свои на каждый запуск: остаток прошлой пробы не подмешивается в новую.
 const TRIAL_PREFIX = 'kph-proverka-';
 const TRIAL_ORDER = /^kph-proverka-[ab](?:-[a-z0-9]+)?$/;
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
@@ -44,7 +45,8 @@ function paths() {
   const config = readJson(join(projectRoot, 'native_host', 'bridge-config.json')) || {};
   const targetDir = resolveChatsDir(join(homedir(), 'Projects', 'Kwork'));
   const kworkRoot = String(config.kworkRoot || '').trim() || dirname(targetDir);
-  return { targetDir, kworkRoot, serviceDir: join(targetDir, 'data'), healthDir: join(targetDir, 'data', health.HEALTH_DIR) };
+  // t3 — побудка идёт в T3 Code ("wakeTo": "t3", тот же переключатель читает мост), иначе в Claude Desktop.
+  return { targetDir, kworkRoot, serviceDir: join(targetDir, 'data'), healthDir: join(targetDir, 'data', health.HEALTH_DIR), t3: config.wakeTo === 't3' };
 }
 
 function pidAlive(pid) {
@@ -84,13 +86,14 @@ async function freshExtensionReport(healthDir, startedAt) {
 }
 
 async function gather() {
-  const { targetDir, kworkRoot, serviceDir, healthDir } = paths();
+  const { targetDir, kworkRoot, serviceDir, healthDir, t3 } = paths();
   const startedAt = Date.now();
   const fresh = await freshExtensionReport(healthDir, startedAt);
   const bridge = readJson(join(healthDir, health.BRIDGE_FILE));
-  const runner = createClaudeRunner();
-  const desktop = runner.desktopChats();
-  const localId = readJson(join(serviceDir, 'dispatcher.json'))?.localId || null;
+  const t3pid = t3 ? createT3Runner().serverPid() : null;
+  const runner = t3 ? null : createClaudeRunner();
+  const desktop = runner ? runner.desktopChats() : new Map();
+  const localId = runner ? readJson(join(serviceDir, 'dispatcher.json'))?.localId || null : null;
   const found = localId ? [...desktop].find(([, chat]) => chat.localId === localId) : null;
   const open = found?.[1].cwd ? runner.openChat(found[1].cwd, found[0], false) : null;
   const state = readJson(join(serviceDir, 'wake-state.json')) || {};
@@ -111,9 +114,12 @@ async function gather() {
     extension: fresh,
     sync: readJson(join(serviceDir, '_sync.json')),
     yougileRouted: Object.values(wakeCore.parseOrderMap(map)).some((order) => order.nicks.some((nick) => nick.startsWith('yougile-'))),
-    desktopRunning: runner.desktopAgeMs() !== null,
-    dispatcher: { configured: Boolean(localId), inDesktop: Boolean(found), pid: open?.pid || null },
-    inboundAccept: readJson(join(homedir(), '.claude', 'settings.json'))?.crossSessionInbound === 'accept',
+    wakeTo: t3 ? 't3' : 'desktop',
+    ...(t3 ? { t3: { pid: t3pid, alive: Boolean(t3pid) } } : {
+      desktopRunning: runner.desktopAgeMs() !== null,
+      dispatcher: { configured: Boolean(localId), inDesktop: Boolean(found), pid: open?.pid || null },
+      inboundAccept: readJson(join(homedir(), '.claude', 'settings.json'))?.crossSessionInbound === 'accept',
+    }),
     pending: Object.entries(state.pending || {}).map(([slug, item]) => ({ slug, since: item.since || Date.now(), error: item.error || null })),
     targetDir,
   };
@@ -133,7 +139,7 @@ function notify(title, message, id) {
 
 // Сторож: о мёртвом звене — одно уведомление, пока оно не оживёт; ожило — одно «снова работает».
 // Уведомляет на втором запуске подряд (5 минут): перезагрузка расширения, разовый отказ Kwork и
-// перезапуск Desktop проходят сами.
+// перезапуск T3 Code проходят сами.
 async function watch() {
   const links = health.evaluate(await gather());
   const stateFile = join(paths().healthDir, 'watch.json');
@@ -156,7 +162,7 @@ async function watch() {
 }
 
 // Пробная побудка. «Клиент» kph-selftest с двумя проверочными заказами: сообщение ложится в переписку так же,
-// как его кладёт мост, будильщик ведёт его обычным путём (выбор заказа, сокет или диспетчер, метка в журнале
+// как его кладёт мост, будильщик ведёт его обычным путём (выбор заказа, чат T3 Code — прежний или новый
 // чата), затем агентская пересылка уводит его во второй заказ. На Kwork ничего не уходит: такого клиента нет.
 function prepareTrial({ targetDir, kworkRoot }, projectsDir = PROJECTS_DIR) {
   // Прерванная проба (Ctrl-C, таймаут) уборку не прошла: её папки увели бы новую побудку в старый заказ.
@@ -198,7 +204,7 @@ async function waitDelivered({ serviceDir }, slug, since, wanted) {
     const entry = (state.delivered?.[slug] || []).find((item) => item.at >= since && (!wanted || item.key === wanted));
     const log = readFileSync(logPath).subarray(logFrom).toString('utf8').split('\n').filter((line) => line.includes(`побудка ${slug}`));
     if (entry) return { entry, log, seconds: Math.round((entry.at - since) / 1000) };
-    if (!hinted && log.some((line) => /уведомление/.test(line))) {
+    if (!hinted && log.some((line) => /уведомление/.test(line) && !/T3/.test(line))) {
       hinted = true;
       console.log('        чата проверочного заказа ещё нет в Claude Desktop: откройте его из уведомления «Kwork: новый чат» — проверка ждёт');
     }
@@ -213,12 +219,15 @@ async function waitDelivered({ serviceDir }, slug, since, wanted) {
 async function trial() {
   const where = paths();
   const startedAt = Date.now();
+  // Проекты T3 упавшей прошлой пробы — до того, как подготовка сотрёт их папки и пути к ним.
+  if (where.t3) await removeTrialProjects(where);
   const { slug, dirs, file } = prepareTrial(where);
   // Уборка одна на пробу: повторный сигнал и finally ждут её же, а не начинают вторую.
   let cleaning = null;
   const clean = () => {
     cleaning ??= cleanupTrial(where, { slug, dirs, file }).then((left) => {
-      if (left.length > 0) console.log(`        в Claude Desktop остались проверочные чаты: ${left.join(', ')} — уберите их в архив или удалите, остальное убрано`);
+      if (left.length > 0) console.log(where.t3 ? `        в T3 Code остались проверочные проекты: ${left.join(', ')} — удалите их в T3 Code, остальное убрано`
+        : `        в Claude Desktop остались проверочные чаты: ${left.join(', ')} — уберите их в архив или удалите, остальное убрано`);
     });
     return cleaning;
   };
@@ -261,23 +270,28 @@ function sweepTrial({ targetDir, kworkRoot }, projectsDir) {
   rmSync(join(targetDir, core.buildDialogSlug(TRIAL_NICK)), { recursive: true, force: true });
 }
 
+// Проекты проверочных заказов в T3 Code (с чатами) — и этой пробы, и прошлых: по папкам в «Активных».
+// → названия тех, что убрать не удалось.
+async function removeTrialProjects({ kworkRoot }, t3) {
+  t3 ??= createT3Runner();
+  const active = join(kworkRoot, wakeCore.ACTIVE_DIR);
+  const left = [];
+  for (const name of existsSync(active) ? readdirSync(active).filter((item) => TRIAL_ORDER.test(item)) : []) {
+    try {
+      await t3.removeProject(join(active, name));
+    } catch (error) {
+      left.push(`${name} (${error.t3 || error.message})`);
+    }
+  }
+
+  return left;
+}
+
 // Чаты проверочных заказов в списке Desktop — и этой пробы, и прошлых, которые тогда убрать не удалось.
 const trialChats = (runner) => [...runner.desktopChats().values()].filter((chat) => !chat.archived && TRIAL_ORDER.test(basename(String(chat.cwd || ''))));
 
-// Проба убирает за собой всё, что завела: побудку в пути, чаты в списке Claude Desktop (в архив), папки проверочных заказов,
-// их строки в списке заказов, переписку и журналы чатов. → названия чатов, которые убрать не удалось.
-async function cleanupTrial(where, { slug, file }, { runner = createClaudeRunner(), projectsDir = PROJECTS_DIR, pause = sleep } = {}) {
-  const pendingGone = () => {
-    const state = readJson(join(where.serviceDir, 'wake-state.json')) || {};
-    return !state.pending?.[slug] && !state.reroute?.[slug] && !existsSync(join(where.serviceDir, WAKE_DIRTY_DIR, slug));
-  };
-  // Пустая переписка снимает недошедшую побудку: иначе будильщик слал бы ссылки и служебные просьбы в чаты заказов.
-  writeFileSync(file, JSON.stringify({ key: TRIAL_NICK, messages: [] }, null, 2));
-  markDirty(where.targetDir, slug);
-  // Строки и папки убираются только после этого: такт будильщика, ещё держащий побудку, без заказов увёл бы её в корень Kwork.
-  for (let waited = 0; waited < 60000 && !pendingGone(); waited += 500) await pause(500);
-
-  // Чат из списка Desktop убирает только сам Desktop: просим диспетчера убрать его в архив.
+// Чат из списка Desktop убирает только сам Desktop: просим диспетчера убрать его в архив. → чаты, что остались.
+async function archiveTrialChats(where, runner, pause) {
   let chats = trialChats(runner);
   if (chats.length > 0) {
     try {
@@ -298,12 +312,32 @@ async function cleanupTrial(where, { slug, file }, { runner = createClaudeRunner
     }
   }
 
-  sweepTrial(where, projectsDir);
   return chats.map((chat) => chat.title || chat.localId);
 }
 
+// Проба убирает за собой всё, что завела: побудку в пути, чаты проверочных заказов (Desktop — в архив через
+// диспетчера, T3 Code — проекты с чатами), папки заказов, их строки в списке заказов, переписку и журналы
+// чатов. → чаты или проекты T3, которые убрать не удалось.
+async function cleanupTrial(where, { slug, file }, { runner, t3, projectsDir = PROJECTS_DIR, pause = sleep } = {}) {
+  const pendingGone = () => {
+    const state = readJson(join(where.serviceDir, 'wake-state.json')) || {};
+    return !state.pending?.[slug] && !state.reroute?.[slug] && !existsSync(join(where.serviceDir, WAKE_DIRTY_DIR, slug));
+  };
+  // Пустая переписка снимает недошедшую побудку: иначе будильщик слал бы ссылки и служебные просьбы в чаты заказов.
+  writeFileSync(file, JSON.stringify({ key: TRIAL_NICK, messages: [] }, null, 2));
+  markDirty(where.targetDir, slug);
+  // Строки и папки убираются только после этого: такт будильщика, ещё держащий побудку, без заказов увёл бы её в корень Kwork.
+  for (let waited = 0; waited < 60000 && !pendingGone(); waited += 500) await pause(500);
+
+  const left = where.t3 ? await removeTrialProjects(where, t3) : await archiveTrialChats(where, runner || createClaudeRunner(), pause);
+  sweepTrial(where, projectsDir);
+  return left;
+}
+
 async function runTrial(where, slug, dirs, startedAt) {
-  const how = (log) => (log.some((line) => line.includes('через диспетчера')) ? 'чат спал, через диспетчера' : 'в открытый чат');
+  // Как дошла — по строке журнала будильщика («через диспетчера», «в чат T3», «новый чат T3 «…»»).
+  const how = (log) => (log.some((line) => line.includes('через диспетчера')) ? 'чат спал, через диспетчера'
+    : log.map((line) => /, ((?:в |новый )[^(]*?)(?: \(|$)/.exec(line)?.[1]).find(Boolean) || 'в открытый чат');
   const first = await waitDelivered(where, slug, startedAt, null);
   if (!first.entry || !dirs.includes(first.entry.key)) {
     return [{ id: 'trial', name: 'Пробная побудка', ok: false, detail: first.entry ? `ушла не в проверочный заказ: ${first.entry.key}` : `не дошла за ${TRIAL_LEG_MS / 60000} мин: ${first.error}` }];

@@ -85,6 +85,14 @@ test('диспетчер: чат без процесса (27.10.2026) — мер
   assert.deepEqual(dead({ inboundAccept: false }), ['inbound']);
 });
 
+test('побудка в T3 Code: звено «T3 Code» вместо диспетчера; закрыт — мертво, и сказано, что побудки ждут', () => {
+  assert.deepEqual(dead({ wakeTo: 't3', t3: { pid: 77, alive: true }, dispatcher: null, inboundAccept: false }), []);
+  const link = health.evaluate(facts({ wakeTo: 't3', t3: { pid: 77, alive: false } })).find((item) => item.id === 't3');
+  assert.equal(link.ok, false);
+  assert.match(link.detail, /T3 Code закрыт/);
+  assert.deepEqual(dead({ wakeTo: 't3', t3: { pid: null, alive: false } }), ['t3']);
+});
+
 test('побудка в пути дольше 10 минут — мертво, свежая — нет', () => {
   assert.deepEqual(dead({ pending: [{ slug: 'ivan', since: NOW - 60 * 1000 }] }), []);
   const links = health.evaluate(facts({ pending: [{ slug: 'ivan', since: NOW - 34 * 60 * 1000, error: 'диспетчер спит' }] }));
@@ -173,6 +181,65 @@ test('пробная побудка убирает за собой: папки �
   const left = await cleanupTrial(where, trial, { runner, projectsDir, pause });
   assert.deepEqual(sent, ['[Kwork-диспетчер] убрать проверочные чаты\nубрать: local_0\nубрать: local_1']);
   assert.match(left.join(), /^kph-proverka-b-[a-z0-9]+$/);
+  assert.equal(fs.readFileSync(mapPath, 'utf8'), '# Заказы\n\n- shop: ivan (выкладка: да)\nне строка заказа\n');
+  assert.deepEqual(fs.readdirSync(path.join(kworkRoot, 'Активные')), ['shop']);
+  assert.deepEqual(fs.readdirSync(targetDir).sort(), ['data', 'ivan']);
+  assert.deepEqual(fs.readdirSync(projectsDir), []);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test('пробная побудка в режиме T3 убирает проекты T3 проверочных заказов до папок, неубранный назван', async () => {
+  const { cleanupTrial, prepareTrial } = await import('../scripts/kwork-health.mjs');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-trial-'));
+  const kworkRoot = path.join(home, 'Kwork');
+  const targetDir = path.join(kworkRoot, 'переписки');
+  const projectsDir = path.join(home, 'projects');
+  const where = { targetDir, kworkRoot, serviceDir: path.join(targetDir, 'data'), t3: true };
+  const mapPath = path.join(kworkRoot, 'docs', 'заказы-клиенты.md');
+  fs.mkdirSync(path.dirname(mapPath), { recursive: true });
+  fs.mkdirSync(path.join(kworkRoot, 'Активные', 'shop'), { recursive: true });
+  fs.mkdirSync(path.join(targetDir, 'ivan'), { recursive: true });
+  fs.writeFileSync(mapPath, '# Заказы\n\n- shop: ivan (выкладка: да)\n');
+
+  // Остатки прерванной пробы: папка, её журнал, строка, старая переписка.
+  const stale = path.join(kworkRoot, 'Активные', 'kph-proverka-a-old1');
+  fs.mkdirSync(stale, { recursive: true });
+  fs.mkdirSync(path.join(projectsDir, projectSlug(stale)), { recursive: true });
+  fs.mkdirSync(path.join(targetDir, 'kph-selftest'), { recursive: true });
+  fs.writeFileSync(path.join(targetDir, 'kph-selftest', 'данные.json'), JSON.stringify({ messages: [{ id: 'старое' }] }));
+  fs.appendFileSync(mapPath, '- kph-proverka-a-old1: kph-selftest (выкладка: нет)\nне строка заказа\n');
+
+  const trial = prepareTrial(where, projectsDir);
+  assert.equal(fs.existsSync(stale), false);
+  assert.deepEqual(fs.readdirSync(projectsDir), []);
+  assert.doesNotMatch(fs.readFileSync(mapPath, 'utf8'), /old1/);
+  assert.equal(JSON.parse(fs.readFileSync(trial.file, 'utf8')).messages.length, 1);
+  assert.match(fs.readFileSync(mapPath, 'utf8'), /kph-proverka-a-[a-z0-9]+: kph-selftest \(выкладка: нет\)/);
+  for (const dir of trial.dirs) fs.mkdirSync(path.join(projectsDir, projectSlug(dir)), { recursive: true });
+
+  // T3 убрал проект первого заказа, второй не дался: он назван, остальное убрано.
+  const sent = [];
+  // Будильщик снимает побудку на третьей паузе: до этого уборка файлы не трогает.
+  fs.writeFileSync(path.join(where.serviceDir, 'wake-state.json'), JSON.stringify({ pending: { 'kph-selftest': {} } }));
+  let pauses = 0;
+  const pause = async () => {
+    pauses += 1;
+    if (pauses === 3) {
+      assert.equal(fs.existsSync(trial.dirs[0]), true);
+      fs.writeFileSync(path.join(where.serviceDir, 'wake-state.json'), '{}');
+      fs.rmSync(path.join(where.serviceDir, 'wake-dirty'), { recursive: true });
+    }
+  };
+  const t3 = {
+    removeProject: async (dir) => {
+      assert.equal(fs.existsSync(dir), true, 'проект T3 убирается до папки');
+      sent.push(path.basename(dir).replace(/-[a-z0-9]+$/, ''));
+      if (dir === trial.dirs[1]) throw Object.assign(new Error('x'), { t3: 'connect ECONNREFUSED' });
+    },
+  };
+  const left = await cleanupTrial(where, trial, { t3, projectsDir, pause });
+  assert.deepEqual(sent, ['kph-proverka-a', 'kph-proverka-b']);
+  assert.match(left.join(), /^kph-proverka-b-[a-z0-9]+ \(connect ECONNREFUSED\)$/);
   assert.equal(fs.readFileSync(mapPath, 'utf8'), '# Заказы\n\n- shop: ivan (выкладка: да)\nне строка заказа\n');
   assert.deepEqual(fs.readdirSync(path.join(kworkRoot, 'Активные')), ['shop']);
   assert.deepEqual(fs.readdirSync(targetDir).sort(), ['data', 'ivan']);

@@ -10,6 +10,7 @@ const { createSyncWake } = require('./sync-wake.js');
 const { createWaker } = require('./waker.js');
 const { createHealthBeat } = require('./health.js');
 const { createClaudeRunner } = require('./claude-runner.js');
+const { createT3Runner } = require('./t3-runner.js');
 
 const CONFIG_PATH = path.join(__dirname, 'bridge-config.json');
 const LOG_PATH = path.join(__dirname, 'bridge.log');
@@ -85,10 +86,14 @@ function startSyncWake() {
 
   const { targetDir } = readDirs();
   const config = readConfig();
+  const t3Runner = createT3Runner();
   waker = createWaker({
     targetDir,
     kworkRoot: String(config.kworkRoot || '').trim() || path.dirname(targetDir),
     runner: createClaudeRunner({ log }),
+    // Побудка в T3 Code — только при "wakeTo": "t3" в bridge-config.json (читается каждый такт,
+    // переход и возврат без перезапуска моста); иначе путь Desktop (сокеты, диспетчер).
+    t3: () => (readConfig().wakeTo === 't3' ? t3Runner : null),
     log,
   });
   setInterval(runWaker, WAKER_TICK_MS).unref();

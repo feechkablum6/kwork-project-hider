@@ -47,8 +47,10 @@ function openUrl(url) {
 // Уведомление macOS, по нажатию открывает url (terminal-notifier из Homebrew; group — одно уведомление
 // на чат). Нет terminal-notifier или он сбоит — report(причина), а чат добавится, когда пользователь выйдет
 // из Desktop.
-function notifyUser({ title, message, url, group }, report = () => {}) {
-  const child = childProcess.spawn('terminal-notifier', ['-title', title, '-message', message, '-open', url, '-group', group, '-sound', 'default'], {
+function notifyUser({ title, message, url, activate, group }, report = () => {}) {
+  // По нажатию: url — открыть ссылку, activate — вывести приложение (код пакета) на передний план.
+  const click = url ? ['-open', url] : activate ? ['-activate', activate] : [];
+  const child = childProcess.spawn('terminal-notifier', ['-title', title, '-message', message, ...click, '-group', group, '-sound', 'default'], {
     stdio: 'ignore',
     detached: true,
     env: { ...process.env, PATH: [process.env.PATH, EXTRA_PATH].filter(Boolean).join(':') },

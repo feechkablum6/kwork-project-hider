@@ -148,7 +148,13 @@ function socketGone(error) {
   return error?.code === 'ENOENT' || error?.code === 'ECONNREFUSED';
 }
 
-function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.now, onCollected = () => {} }) {
+const T3_BUNDLE = 'com.t3tools.t3code';
+const T3_IMPORT = 'import:claudeAgent:';
+const T3_WAIT_MS = 10 * 1000;
+
+// t3 — транспорт T3 Code или функция, которая на каждый такт отдаёт его либо null (переключатель wakeTo в bridge-config.json).
+function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, log = () => {}, now = Date.now, onCollected = () => {} }) {
+  let t3 = null;
   const serviceDir = path.join(targetDir, 'data');
   const statePath = path.join(serviceDir, STATE_FILE);
   const dirtyDir = path.join(serviceDir, WAKE_DIRTY_DIR);
@@ -575,11 +581,25 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       return;
     }
 
+    if (t3) {
+      await wakeT3(state, slug, item, record, news, route);
+      return;
+    }
+
     const desktop = runner.desktopChats();
     // Побочный чат, запущенный из чата заказа (отдельная задача в той же папке), — не чат заказа:
     // 05.11.2026 побудка YouGile ушла в такой, потому что он был свежее основного.
     const side = (id) => desktop.get(id)?.side === true;
-    const chat = state.chats[route.key] && !side(state.chats[route.key].sessionId) ? state.chats[route.key] : null;
+    // Чат, записанный путём T3: импортированный из Desktop — тот же чат Desktop, свой чат T3 Desktop не знает.
+    const saved = state.chats[route.key];
+    const savedId = String(saved?.sessionId || '');
+    const known = !saved || !savedId.includes(':') ? saved : savedId.startsWith(T3_IMPORT) ? { ...saved, sessionId: savedId.slice(T3_IMPORT.length) } : null;
+    // Запись приводится к виду Desktop и в состоянии: из неё строятся ссылка resume и уведомление.
+    if (known !== saved) {
+      if (known) state.chats[route.key] = known;
+      else delete state.chats[route.key];
+    }
+    const chat = known && !side(known.sessionId) ? known : null;
     const nick = record.key || slug;
 
     // Чат заказа один: наш прошлый, а у заказа без него — самый свежий чат Desktop его папки, в том числе
@@ -602,20 +622,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
       return;
     }
 
-    const text = wakeCore.buildWakeText({
-      wakeId: item.wakeId,
-      nick,
-      record,
-      messages: news.messages,
-      events: news.events,
-      reason: news.reason,
-      verdicts: draftVerdicts(slug, record, news.messages),
-      route,
-      dialogDir: path.join(targetDir, slug),
-      chatScript,
-      rerouteScript,
-      rulesPath,
-    });
+    const text = wakeText(slug, item, record, news, route, nick);
 
     // Чат открыт в Desktop (этот или, в папке заказа, другой чат пользователя) — сообщение
     // приходит прямо в него, как от другой сессии Claude, за секунду.
@@ -687,6 +694,77 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
 
     showChat(state, slug, state.chats[route.key]);
     item.nextAt = now() + CONFIRM_RECHECK_MS;
+  }
+
+  function wakeText(slug, item, record, news, route, nick) {
+    return wakeCore.buildWakeText({
+      wakeId: item.wakeId,
+      nick,
+      record,
+      messages: news.messages,
+      events: news.events,
+      reason: news.reason,
+      verdicts: draftVerdicts(slug, record, news.messages),
+      route,
+      dialogDir: path.join(targetDir, slug),
+      chatScript,
+      rerouteScript,
+      rulesPath,
+    });
+  }
+
+  // Побудка в T3 Code. Чат заказа один: наш прошлый (номер чата Desktop — импортированный чат T3), иначе
+  // самый свежий чат проекта заказа в T3; клиент без заказа — только свой чат в корне Kwork. Чата нет —
+  // новый чат T3 с побудкой первым сообщением. T3 принял — побудка разобрана: очередь чата держит сервер T3.
+  async function wakeT3(state, slug, item, record, news, route) {
+    const nick = record.key || slug;
+    const name = route.order?.name || nick;
+    // T3 закрыт — побудка ждёт без счёта попыток: сбоем это не считаем, иначе повторы ушли бы на 30 минут.
+    if (!t3.serverPid()) {
+      item.nextAt = now() + T3_WAIT_MS;
+      item.error = 'T3 Code закрыт';
+      return;
+    }
+
+    const saved = state.chats[route.key];
+    const known = saved ? t3.threadId(saved.sessionId) : null;
+    // Импортированный чат T3 — тот же сеанс Claude, что чат Desktop: пока Desktop держит его процесс,
+    // вторую копию не поднимаем — ждём и один раз просим закрыть Desktop.
+    const heldInDesktop = (threadId, dir) => threadId?.startsWith(T3_IMPORT) && Boolean(runner.openChat(dir, threadId.slice(T3_IMPORT.length), false));
+    const wait = (threadId) => {
+      item.nextAt = now() + T3_WAIT_MS;
+      item.error = 'чат открыт в Claude Desktop — закройте Desktop';
+      if (item.heldInDesktop) return;
+      item.heldInDesktop = true;
+      log(`побудка ${slug}: чат ${threadId} ещё открыт в Claude Desktop — ждём, пока Desktop его отпустит`);
+      runner.notify({ title: `Kwork: ${nick} ждёт`, message: `Чат «${name}» ещё открыт в Claude Desktop — закройте Desktop, побудка уйдёт в T3 Code`, group: `kph-desktop-${slug}` });
+    };
+    const text = wakeText(slug, item, record, news, route, nick);
+    const delivered = (threadId, how) => {
+      // Прежний чат остаётся в своей папке (чат заказа мог жить в корне Kwork): по ней путь Desktop ищет журнал.
+      state.chats[route.key] = { sessionId: threadId, dir: threadId === known ? saved.dir : route.dir, nick, startedAt: now() };
+      const released = release(state, route.key);
+      settle(state, slug, news, { wakeId: item.wakeId, key: route.key });
+      log(`побудка ${slug}: ${news.reason}, ${how}${route.reason ? ` (${route.reason})` : ''}${released}`);
+    };
+
+    if (known && heldInDesktop(known, saved.dir)) return wait(known);
+    if (known && await t3.send(known, text)) return delivered(known, 'в чат T3');
+    const latest = route.order ? await t3.latestThread(route.dir, name) : null;
+    if (latest && latest !== known && heldInDesktop(latest, route.dir)) return wait(latest);
+    if (latest && latest !== known && await t3.send(latest, text)) return delivered(latest, 'в свежий чат заказа в T3');
+
+    // Своё сообщение или свои опции без чата клиента — новый чат ради них не заводится.
+    const clientActed = news.reason === 'client' || news.events.some((event) => event.actor !== 'me');
+    if (!clientActed) {
+      settle(state, slug, news);
+      log(`побудка ${slug}: своё действие, чата клиента в T3 нет — пропущено`);
+      return;
+    }
+
+    const threadId = await t3.start(route.dir, name, text);
+    delivered(threadId, `новый чат T3 «${name}»`);
+    runner.notify({ title: `Kwork: новый чат ${nick}`, message: `Клиент написал — чат «${name}» в T3 Code`, activate: T3_BUNDLE, group: `kph-${threadId}` });
   }
 
   // Чат Desktop с названием заказа в папке Kwork: [номер CLI, папка] или null; не из архива — первым.
@@ -821,6 +899,7 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
     }
 
     running = true;
+    t3 = typeof t3Source === 'function' ? t3Source() : t3Source;
     try {
       if (!owner) {
         owner = acquireLock(lockPath);
@@ -864,8 +943,11 @@ function createWaker({ targetDir, kworkRoot, runner, log = () => {}, now = Date.
 
       await wakeDue(state);
       try {
-        await keepDispatcher(state);
-        cleanWakeTexts();
+        // В T3 диспетчера нет.
+        if (!t3) {
+          await keepDispatcher(state);
+          cleanWakeTexts();
+        }
       } catch (error) {
         log(`диспетчер не проверен: ${error?.message || error}`);
       }

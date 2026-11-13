@@ -140,12 +140,18 @@ function evaluate(facts) {
     }
   }
 
-  const d = facts.dispatcher || {};
-  add('dispatcher', 'Диспетчер', Boolean(d.pid), !facts.desktopRunning ? 'Claude Desktop закрыт'
-    : !d.configured ? 'не задан (data/dispatcher.json)'
-      : !d.inDesktop ? 'чата «Kwork-диспетчер» нет в Claude Desktop'
-        : d.pid ? `процесс ${d.pid}` : 'спит: чат есть, процесса нет — откройте чат «Kwork-диспетчер»');
-  add('inbound', 'Приём сообщений чатами', Boolean(facts.inboundAccept), facts.inboundAccept ? 'включён' : 'в ~/.claude/settings.json нет crossSessionInbound: accept');
+  if (facts.wakeTo === 't3') {
+    // Побудку доставляет CLI T3 Code ("wakeTo": "t3"): без его сервера побудки ждут в пути и повторяются.
+    const t3 = facts.t3 || {};
+    add('t3', 'T3 Code', Boolean(t3.alive), t3.alive ? `сервер ${t3.pid}` : 'T3 Code закрыт — побудки ждут, пока вы его откроете');
+  } else {
+    const d = facts.dispatcher || {};
+    add('dispatcher', 'Диспетчер', Boolean(d.pid), !facts.desktopRunning ? 'Claude Desktop закрыт'
+      : !d.configured ? 'не задан (data/dispatcher.json)'
+        : !d.inDesktop ? 'чата «Kwork-диспетчер» нет в Claude Desktop'
+          : d.pid ? `процесс ${d.pid}` : 'спит: чат есть, процесса нет — откройте чат «Kwork-диспетчер»');
+    add('inbound', 'Приём сообщений чатами', Boolean(facts.inboundAccept), facts.inboundAccept ? 'включён' : 'в ~/.claude/settings.json нет crossSessionInbound: accept');
+  }
 
   const stuck = (facts.pending || []).filter((item) => now - item.since > PENDING_STALE_MS);
   add('pending', 'Побудки в пути', stuck.length === 0, stuck.length === 0
