@@ -81,7 +81,7 @@
 
 ## Мост
 
-Правила ниже про Claude Desktop, сокеты и диспетчера — для пути Desktop (по умолчанию); `"wakeTo": "t3"` в `native_host/bridge-config.json` переводит побудку в T3 Code (`native_host/t3-runner.js`).
+Правила ниже про Claude Desktop, сокеты и диспетчера — для пути Desktop (без переключателя); `"wakeTo": "t3"` (включено 13.11.2026) в `native_host/bridge-config.json` переводит побудку в T3 Code (`native_host/t3-runner.js`).
 
 - DO NOT включать `"wakeTo": "t3"`, пока пользователь работает в Claude Desktop: чат T3, импортированный из Desktop, — тот же сеанс Claude, побудка запускает его второй копией рядом с открытым чатом Desktop, а недоставленная побудка Desktop уходит в T3 повторно. 13.11.2026 за 5 минут такого переключения три сообщения sobolevs разбирали оба чата; вернули откатом отметок в `wake-state.json`. Переход — только по слову пользователя, затем `npm run health -- --wake`.
 
