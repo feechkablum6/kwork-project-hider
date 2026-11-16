@@ -950,7 +950,7 @@ test('без ключа API (routeAi вернул null) выбор заказа 
 });
 
 test('ключ API не работает (кончился баланс) — одно уведомление за 6 часов, побудки идут как раньше', async () => {
-  const { world, advance } = await worldWithTwoOrders({ routeAi: async () => { throw Object.assign(new Error('API 400: credit balance is too low'), { status: 400 }); } });
+  const { world, advance } = await worldWithTwoOrders({ routeAi: async () => { throw Object.assign(new Error('API 400: credit balance is too low'), { status: 400, alert: true }); } });
   world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'вопрос')]);
   await world.waker.tick();
   await world.claude.waitInbox(1);

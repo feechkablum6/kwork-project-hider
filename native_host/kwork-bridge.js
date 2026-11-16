@@ -11,7 +11,7 @@ const { createWaker } = require('./waker.js');
 const { createHealthBeat } = require('./health.js');
 const { createClaudeRunner } = require('./claude-runner.js');
 const { createT3Runner } = require('./t3-runner.js');
-const { classifyRoute } = require('./route-ai.js');
+const { classifyRoute, claudeCodeProxy } = require('./route-ai.js');
 
 const CONFIG_PATH = path.join(__dirname, 'bridge-config.json');
 const LOG_PATH = path.join(__dirname, 'bridge.log');
@@ -98,7 +98,7 @@ function startSyncWake() {
     // Заказ по смыслу сообщений — только с ключом API в bridge-config.json ("anthropicApiKey"); без него — где работали последним.
     routeAi: (input) => {
       const apiKey = String(readConfig().anthropicApiKey || '').trim();
-      return apiKey ? classifyRoute({ ...input, apiKey }) : null;
+      return apiKey ? classifyRoute({ ...input, apiKey, proxy: claudeCodeProxy() }) : null;
     },
     log,
   });

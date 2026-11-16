@@ -417,8 +417,8 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeA
       item.guess = null;
       const why = String(error?.message || error).slice(0, 200);
       log(`побудка ${slug}: выбор заказа по API не удался — ${why}`);
-      // Ключ отозван или кончился баланс (4xx, кроме 429): сам не пройдёт — уведомление, не чаще раза в 6 часов.
-      if (error?.status >= 400 && error.status < 500 && error.status !== 429 && now() - routeAlertAt > ROUTE_ALERT_MS) {
+      // Ключ отозван, кончился баланс или выключен прокси (alert): сам не пройдёт — уведомление, не чаще раза в 6 часов.
+      if (error?.alert && now() - routeAlertAt > ROUTE_ALERT_MS) {
         routeAlertAt = now();
         runner.notify({ title: 'Kwork: выбор заказа по API не работает', message: `${why}. Побудки идут туда, где работали последним.`, group: 'kph-route-ai' });
       }

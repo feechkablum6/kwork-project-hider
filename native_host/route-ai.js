@@ -1,9 +1,13 @@
 // Выбор заказа для побудки по смыслу сообщений: у клиента несколько заказов, и модель Claude по API
 // (ключ пользователя — "anthropicApiKey" в bridge-config.json) называет тот, к которому относятся
 // новые сообщения. Ответ ограничен списком заказов схемой, текст клиента — только данные.
-// Запрос — fetch без SDK: в мосту нет зависимостей (правило проекта).
+// Запрос — https без SDK: в мосту нет зависимостей (правило проекта). Идёт через прокси Claude Code
+// (env.HTTPS_PROXY в ~/.claude/settings.json): напрямую из России API отвечает 403 «Request not allowed»,
+// а мост запускает Chrome — переменных прокси у его процесса нет.
 
 const fs = require('node:fs');
+const https = require('node:https');
+const os = require('node:os');
 const path = require('node:path');
 
 const wakeCore = require('./wake-core.js');
@@ -118,9 +122,49 @@ function buildRouteRequest({ orders, record, news, last = null }) {
   };
 }
 
-// → { order: заказ из orders или null («неясно», отказ, обрыв), why }. Сбой сети или API — исключение
-// (у ответа API — status: 4xx кроме 429 — ключ, баланс или запрос, сам не пройдёт).
-async function classifyRoute({ apiKey, orders, record, news, last = null, fetchImpl = fetch, timeoutMs = TIMEOUT_MS, pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
+function claudeCodeProxy(home = os.homedir()) {
+  try {
+    const env = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8')).env || {};
+    return String(env.HTTPS_PROXY || env.https_proxy || '').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// fetch на https.request: прокси — только у этого запроса (агент с proxyEnv), связь моста с T3 на localhost не задета.
+// Сигнал обрабатывается здесь: пока туннель через прокси не поднят (прокси принял CONNECT и молчит), запрос,
+// прерванный своим signal, не даёт ни error, ни close — промис висел бы вечно и держал такт будильщика.
+// tunnelMs — таймаут установки туннеля у Node (опция timeout): закрывает и сокет CONNECT к молчащему прокси;
+// чуть больше таймаута сигнала, чтобы первым срабатывал signal и ошибка оставалась TimeoutError (без повтора).
+function proxiedFetch(proxy, tunnelMs) {
+  return (url, { method, headers, body, signal }) => new Promise((resolve, reject) => {
+    const agent = proxy ? new https.Agent({ proxyEnv: { HTTPS_PROXY: proxy } }) : undefined;
+    const fail = (error) => {
+      agent?.destroy();
+      reject(error);
+    };
+    const request = https.request(url, { method, headers, agent, timeout: tunnelMs }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('error', fail);
+      response.on('end', () => {
+        agent?.destroy();
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve({ ok: response.statusCode >= 200 && response.statusCode < 300, status: response.statusCode, json: async () => JSON.parse(text) });
+      });
+    });
+    signal?.addEventListener('abort', () => {
+      request.destroy();
+      fail(signal.reason);
+    }, { once: true });
+    request.on('error', fail);
+    request.end(body);
+  });
+}
+
+// → { order: заказ из orders или null («неясно», отказ, обрыв), why }. Сбой сети или API — исключение;
+// alert: true — сбой сам не пройдёт (ключ, баланс, выключенный прокси).
+async function classifyRoute({ apiKey, orders, record, news, last = null, proxy = null, timeoutMs = TIMEOUT_MS, fetchImpl = proxiedFetch(proxy, timeoutMs + 1000), pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const body = JSON.stringify(buildRouteRequest({ orders, record, news, last }));
   let response;
   let data;
@@ -139,10 +183,15 @@ async function classifyRoute({ apiKey, orders, record, news, last = null, fetchI
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
-      // fetch бросает TypeError при обрыве сети; таймаут (30 с) не повторяется.
-      if (retry && error?.name === 'TypeError') {
+      // Обрыв сети или прокси не отвечает — ещё попытка; таймаут (30 с) не повторяется.
+      if (retry && error?.name !== 'AbortError' && error?.name !== 'TimeoutError') {
         await pause(RETRY_MS);
         continue;
+      }
+
+      // Прокси Claude Code не запущен (VPN выключен) — сам не пройдёт, пользователю нужно знать.
+      if (proxy && error?.code === 'ECONNREFUSED') {
+        throw Object.assign(new Error(`прокси Claude Code ${proxy} не отвечает — VPN выключен?`), { alert: true });
       }
 
       throw error;
@@ -155,7 +204,9 @@ async function classifyRoute({ apiKey, orders, record, news, last = null, fetchI
       continue;
     }
 
-    throw Object.assign(new Error(`API ${response.status}${data?.error?.message ? `: ${data.error.message}` : ''}`), { status: response.status });
+    // 4xx кроме 429 — ключ отозван, баланс кончился или запрос не принят: сам не пройдёт (alert — уведомить).
+    const alert = response.status >= 400 && response.status < 500 && response.status !== 429;
+    throw Object.assign(new Error(`API ${response.status}${data?.error?.message ? `: ${data.error.message}` : ''}`), { status: response.status, alert });
   }
 
   if (data?.stop_reason !== 'end_turn') {
@@ -170,6 +221,7 @@ async function classifyRoute({ apiKey, orders, record, news, last = null, fetchI
 module.exports = {
   MODEL,
   buildRouteRequest,
+  claudeCodeProxy,
   classifyRoute,
   orderBrief,
 };

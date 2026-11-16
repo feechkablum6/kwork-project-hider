@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
+const net = require('node:net');
 const path = require('node:path');
 
 const routeAi = require('../native_host/route-ai.js');
@@ -94,8 +95,42 @@ test('перегрузка API или обрыв сети — ещё одна п
   const offline = replies(new TypeError('fetch failed'), ok);
   assert.equal((await routeAi.classifyRoute({ apiKey: 'k', orders, record, news, fetchImpl: offline, pause })).order, orders[1]);
   const twice = replies(fail(529), fail(503));
-  await assert.rejects(routeAi.classifyRoute({ apiKey: 'k', orders, record, news, fetchImpl: twice, pause }), (error) => error.status === 503);
+  await assert.rejects(routeAi.classifyRoute({ apiKey: 'k', orders, record, news, fetchImpl: twice, pause }), (error) => error.status === 503 && !error.alert);
   const broke = replies(fail(400), ok);
-  await assert.rejects(routeAi.classifyRoute({ apiKey: 'k', orders, record, news, fetchImpl: broke, pause }), (error) => error.status === 400 && /credit balance/.test(error.message));
+  await assert.rejects(routeAi.classifyRoute({ apiKey: 'k', orders, record, news, fetchImpl: broke, pause }), (error) => error.status === 400 && error.alert && /credit balance/.test(error.message));
   assert.equal(broke.calls, 1);
+});
+
+test('прокси — тот же, что у Claude Code: env.HTTPS_PROXY из ~/.claude/settings.json; нет настройки — напрямую', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-proxy-'));
+  assert.equal(routeAi.claudeCodeProxy(home), null);
+  fs.mkdirSync(path.join(home, '.claude'));
+  fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({ env: { https_proxy: 'http://127.0.0.1:1081' } }));
+  assert.equal(routeAi.claudeCodeProxy(home), 'http://127.0.0.1:1081');
+  fs.writeFileSync(path.join(home, '.claude', 'settings.json'), '{ битый');
+  assert.equal(routeAi.claudeCodeProxy(home), null);
+});
+
+test('прокси принял соединение и молчит (VPN-сервер недоступен) — запрос отклоняется по таймауту, такт не висит; прокси выключен — ошибка с уведомлением', async () => {
+  const orders = [{ name: 'lombard', dir: '/l', brief: '' }, { name: 'park', dir: '/p', brief: '' }];
+  let closedByClient;
+  const closed1 = new Promise((resolve) => { closedByClient = resolve; });
+  const silent = net.createServer((socket) => socket.on('data', () => {}).on('close', closedByClient));
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve));
+  const proxy = `http://127.0.0.1:${silent.address().port}`;
+  const started = Date.now();
+  await assert.rejects(routeAi.classifyRoute({ apiKey: 'k', orders, record, news, proxy, timeoutMs: 300, pause: async () => {} }), (error) => error.name === 'TimeoutError');
+  assert.ok(Date.now() - started < 2000);
+  // Соединение с молчащим прокси мост закрывает сам (таймаут туннеля), сокеты не копятся.
+  await closed1;
+  silent.close();
+
+  const closed = net.createServer();
+  await new Promise((resolve) => closed.listen(0, '127.0.0.1', resolve));
+  const port = closed.address().port;
+  await new Promise((resolve) => closed.close(resolve));
+  await assert.rejects(
+    routeAi.classifyRoute({ apiKey: 'k', orders, record, news, proxy: `http://127.0.0.1:${port}`, pause: async () => {} }),
+    (error) => error.alert === true && /прокси Claude Code http:\/\/127\.0\.0\.1:\d+ не отвечает — VPN выключен\?/.test(error.message),
+  );
 });
