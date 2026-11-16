@@ -68,6 +68,25 @@ test('два действующих заказа — побудка идёт в 
   assert.equal(wakeCore.planRoute({ orders: [park, shop], kworkRoot: '/k', slug: 'ivan', workedAt, guessed: '/k/Активные/other' }).reason, 'ambiguous');
 });
 
+test('пустяк — только короткие сообщения клиента без вопроса, файлов и событий; модель спрашивается только о них', () => {
+  const rec = record([mine(9, 0, 'готово, проверьте')]);
+  const news = (messages, extra = {}) => ({ reason: 'client', messages, events: [], ...extra });
+  assert.equal(wakeCore.looksTrivial(news([message(1, 0, 'client', 'Спасибо!')]), rec), true);
+  assert.equal(wakeCore.looksTrivial(news([message(1, 0, 'client', 'ок'), message(2, 1, 'client', '👍')]), rec), true);
+  assert.equal(wakeCore.looksTrivial(news([message(1, 0, 'client', 'Подключились?')]), rec), false);
+  assert.equal(wakeCore.looksTrivial(news([message(1, 0, 'client', 'спасибо'), message(2, 1, 'client', 'х'.repeat(61))]), rec), false);
+  assert.equal(wakeCore.looksTrivial(news([{ ...message(1, 0, 'client', 'вот'), attachments: [{ name: 'a.png' }] }]), rec), false);
+  assert.equal(wakeCore.looksTrivial(news([{ ...message(1, 0, 'client', 'ок'), event: { type: 'offer' } }]), rec), false);
+  assert.equal(wakeCore.looksTrivial(news([message(1, 0, 'client', 'ок')], { events: [{ time: message(1, 0).time }] }), rec), false);
+  assert.equal(wakeCore.looksTrivial(news([mine(1, 0, 'спасибо')], { reason: 'own' }), rec), false);
+  assert.equal(wakeCore.looksTrivial(news([]), rec), false);
+  // Первое обращение («Здравствуйте») — не пустяк: клиент ждёт ответа, прежде чем написать суть.
+  assert.equal(wakeCore.looksTrivial(news([message(1, 0, 'client', 'Здравствуйте')]), record([message(1, 0, 'client', 'Здравствуйте')])), false);
+  // YouGile и FL.ru: файл и событие биржи там — короткий текст-заглушка без полей attachments/event.
+  assert.equal(wakeCore.looksTrivial(news([message(1, 0, 'client', '(файл без текста, смотрите на FL.ru)')]), { ...rec, source: 'fl' }), false);
+  assert.equal(wakeCore.looksTrivial(news([message(1, 0, 'client', 'Готово')]), { ...rec, source: 'yougile' }), false);
+});
+
 test('клиент без заказа — корень Kwork, у каждого клиента свой ключ маршрута', () => {
   const ivan = wakeCore.planRoute({ orders: [], kworkRoot: '/k', slug: 'ivan' });
   assert.deepEqual([ivan.dir, ivan.key, ivan.root, ivan.reason, ivan.order], ['/k', '/k::ivan', true, 'no-order', null]);
@@ -104,7 +123,7 @@ test('побудка при нескольких заказах: чужое со
   assert.doesNotMatch(text, /t3_|T3|settled/);
 });
 
-function createWorld({ now, routeAi } = {}) {
+function createWorld({ now, routeAi, trivialAi } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-wake-'));
   const kworkRoot = path.join(home, 'Kwork');
   const targetDir = path.join(kworkRoot, 'переписки');
@@ -119,7 +138,7 @@ function createWorld({ now, routeAi } = {}) {
   const save = (messages) => handleCommand(targetDir, { command: 'save-dialog', dialog: { key: 'ivan', clientId: '501', messages } });
   const claude = createFakeClaude({ home, now });
   const logs = [];
-  const waker = createWaker({ targetDir, kworkRoot, runner: claude.runner, routeAi, log: (line) => logs.push(line), ...(now ? { now } : {}) });
+  const waker = createWaker({ targetDir, kworkRoot, runner: claude.runner, routeAi, trivialAi, log: (line) => logs.push(line), ...(now ? { now } : {}) });
   const stateOf = () => JSON.parse(fs.readFileSync(path.join(targetDir, 'data', 'wake-state.json'), 'utf8'));
   // Диспетчер в Desktop: открыт (open = true) или только в списке Desktop, без процесса.
   const dispatcher = ({ open = true } = {}) => (open ? claude.openDispatcher(dispatcherDir) : claude.addToDesktop('disp-cli', { cwd: dispatcherDir }));
@@ -828,9 +847,9 @@ test('при двух заказах побудка идёт в тот, где �
 });
 
 // Клиент с двумя заказами, оба чата открыты в Desktop; в shop работали последним.
-async function worldWithTwoOrders({ routeAi } = {}) {
+async function worldWithTwoOrders({ routeAi, trivialAi } = {}) {
   let clock = Date.parse('2026-10-14T10:00:00Z');
-  const world = createWorld({ now: () => clock, routeAi });
+  const world = createWorld({ now: () => clock, routeAi, trivialAi });
   const parkDir = path.join(world.kworkRoot, 'Активные', 'park');
   fs.mkdirSync(parkDir);
   fs.writeFileSync(path.join(world.kworkRoot, 'docs', 'заказы-клиенты.md'), '- shop: ivan\n- park: ivan\n');
@@ -947,6 +966,137 @@ test('без ключа API (routeAi вернул null) выбор заказа 
   assert.equal(world.claude.inbox[0].sessionId, 'shop-chat');
   assert.equal(calls, 1);
   world.claude.closeDesktopChats();
+});
+
+test('пустяк клиента агента не будит: побудка придерживается и уходит вместе со следующим сообщением', async () => {
+  let clock = Date.parse('2026-10-14T10:00:00Z');
+  const asked = [];
+  let verdict = { wake: false, why: 'благодарность' };
+  const world = createWorld({ now: () => clock, trivialAi: async (input) => { asked.push(input); return verdict; } });
+  world.claude.say(world.orderDir, 'shop-chat', clock - 1000);
+  world.claude.addToDesktop('shop-chat', { cwd: world.orderDir });
+  world.claude.openDesktopChat(world.orderDir, 'shop-chat');
+  world.save([mine(1, 0, 'готово, проверьте')]);
+  await world.waker.tick();
+
+  world.save([mine(1, 0, 'готово, проверьте'), message(2, 5, 'client', 'Спасибо!')]);
+  await world.waker.tick();
+  clock += 2 * 60 * 60 * 1000;
+  for (let step = 0; step < 3; step += 1) await world.waker.tick();
+  assert.equal(world.claude.inbox.length, 0);
+  assert.equal(asked.length, 1);
+  assert.deepEqual(asked[0].news.messages.map((item) => item.text), ['Спасибо!']);
+  assert.equal(world.stateOf().pending.ivan.trivial, true);
+  assert.match(world.logs.join('\n'), /пустяк — не будим \(благодарность\)/);
+
+  // Следующее сообщение с вопросом — модель не спрашивается, агент получает оба.
+  world.save([mine(1, 0, 'готово, проверьте'), message(2, 5, 'client', 'Спасибо!'), message(3, 9, 'client', 'а счёт когда?')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(1);
+  assert.equal(asked.length, 1);
+  assert.match(world.claude.inbox[0].user.message.content, /Спасибо!\n.*а счёт когда\?/s);
+  clock += 2000;
+  await world.waker.tick();
+  assert.equal(world.stateOf().pending.ivan, undefined);
+
+  // Модель сказала «будить» (ответ «да» на предложение — решение клиента) — побудка как обычно.
+  // Своё сообщение в пачке — не пустяк, модель не спрашивается.
+  verdict = { wake: true, why: 'согласие на предложение' };
+  const before = [mine(1, 0, 'готово, проверьте'), message(2, 5, 'client', 'Спасибо!'), message(3, 9, 'client', 'а счёт когда?'), mine(4, 12, 'выкладываю?')];
+  world.save(before);
+  await world.waker.tick();
+  await world.claude.waitInbox(2);
+  clock += 2000;
+  await world.waker.tick();
+  assert.equal(asked.length, 1);
+  world.save([...before, message(5, 14, 'client', 'да')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(3);
+  assert.equal(asked.length, 2);
+  assert.match(asked[1].record.messages.map((item) => item.text).join('|'), /выкладываю\?\|да/);
+  world.claude.closeDesktopChats();
+});
+
+test('пустяк клиента с несколькими заказами придерживается без запроса о заказе', async () => {
+  const routed = [];
+  const { world, advance } = await worldWithTwoOrders({ routeAi: async (input) => { routed.push(input); return { order: null, why: '' }; }, trivialAi: async () => ({ wake: false, why: 'благодарность' }) });
+  const task = [message(1, 0, 'me', 'жду'), message(2, 3, 'client', 'сделайте шлагбаум, как обсуждали вчера по телефону, жду к пятнице')];
+  world.save(task);
+  await world.waker.tick();
+  await world.claude.waitInbox(1);
+  advance(2000);
+  await world.waker.tick();
+  assert.equal(routed.length, 1);
+  world.save([...task, message(3, 5, 'client', 'спасибо')]);
+  await world.waker.tick();
+  assert.equal(world.stateOf().pending.ivan.trivial, true);
+  assert.equal(routed.length, 1);
+  assert.equal(world.claude.inbox.length, 1);
+  world.claude.closeDesktopChats();
+});
+
+test('придержанный пустяк клиент исправил — решение модели сбрасывается, не ждём час', async () => {
+  let clock = Date.parse('2026-10-14T10:00:00Z');
+  const asked = [];
+  const world = createWorld({ now: () => clock, trivialAi: async (input) => { asked.push(input); return { wake: false, why: 'подтверждение' }; } });
+  world.save([mine(1, 0, 'готово, проверьте')]);
+  await world.waker.tick();
+  world.save([mine(1, 0, 'готово, проверьте'), message(2, 5, 'client', 'ок')]);
+  await world.waker.tick();
+  assert.equal(world.stateOf().pending.ivan.trivial, true);
+  clock += 60 * 1000;
+  world.save([mine(1, 0, 'готово, проверьте'), message(2, 5, 'client', 'ок, но цвет кнопки поменяйте на синий и шрифт крупнее, пожалуйста')]);
+  await world.waker.tick();
+  assert.equal(asked.length, 1);
+  assert.equal(world.stateOf().pending.ivan.trivial, undefined);
+  assert.match(world.logs.join('\n'), /новый чат/);
+});
+
+test('проверка пустяка по API упала — будить', async () => {
+  const world = createWorld({ trivialAi: async () => { throw new Error('API 529: Overloaded'); } });
+  world.save([mine(1, 0, 'жду')]);
+  await world.waker.tick();
+  world.save([mine(1, 0, 'жду'), message(2, 5, 'client', 'ок')]);
+  await world.waker.tick();
+  assert.equal(world.stateOf().pending.ivan.trivial, false);
+  assert.match(world.logs.join('\n'), /проверка пустяка по API не удалась — API 529: Overloaded/);
+  assert.match(world.logs.join('\n'), /новый чат/);
+});
+
+test('побудку, пересланную агентом в другой заказ, модель на пустяк заново не проверяет', async () => {
+  const verdicts = [new Error('timeout'), { wake: false, why: 'благодарность' }];
+  const asked = [];
+  const { world, ask, advance } = await worldWithTwoOrders({ trivialAi: async () => { const next = verdicts.shift(); asked.push(next); if (next instanceof Error) throw next; return next; } });
+  const task = [message(1, 0, 'me', 'жду'), message(2, 3, 'client', 'сделайте шлагбаум, как обсуждали вчера по телефону, жду к пятнице')];
+  world.save(task);
+  await world.waker.tick();
+  await world.claude.waitInbox(1);
+  advance(2000);
+  await world.waker.tick();
+  // Проверка пустяка не удалась — побудка ушла туда, где работали последним (shop); агент пересылает её в park.
+  world.save([...task, message(3, 5, 'client', 'Спасибо, всё супер')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(2);
+  assert.equal(world.claude.inbox[1].sessionId, 'shop-chat');
+  advance(2000);
+  await world.waker.tick();
+  ask(wakeNumber(world.claude.inbox[1]), 'park');
+  advance(2000);
+  await world.waker.tick();
+  await world.claude.waitInbox(3);
+  assert.equal(world.claude.inbox[2].sessionId, 'park-chat');
+  assert.equal(asked.length, 1);
+  world.claude.closeDesktopChats();
+});
+
+test('без ключа API пустяк будит, как раньше', async () => {
+  const world = createWorld({ trivialAi: () => null });
+  world.save([mine(1, 0, 'жду')]);
+  await world.waker.tick();
+  world.save([mine(1, 0, 'жду'), message(2, 5, 'client', 'ок')]);
+  await world.waker.tick();
+  assert.equal(world.stateOf().pending.ivan.trivial, undefined);
+  assert.match(world.logs.join('\n'), /новый чат/);
 });
 
 test('ключ API не работает (кончился баланс) — одно уведомление за 6 часов, побудки идут как раньше', async () => {

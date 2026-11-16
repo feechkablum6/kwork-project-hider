@@ -68,6 +68,9 @@ const RELAY_RESET_MS = 60 * 60 * 1000;
 const WAKE_TEXTS_DIR = 'wake-texts';
 const WAKE_TEXT_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 const ROUTE_ALERT_MS = 6 * 60 * 60 * 1000;
+// Придержанный пустяк перечитывается так редко: новое сообщение клиента и так заводит новую побудку.
+const TRIVIAL_RECHECK_MS = 60 * 60 * 1000;
+const textsOf = (news) => (news.messages || []).map((message) => String(message.text || '')).join('\n');
 // Разрыв между тактами больше этого — мак спал: ожидание метки сдвигается на время сна.
 const SLEEP_GAP_MS = 30 * 1000;
 
@@ -155,7 +158,8 @@ const T3_WAIT_MS = 10 * 1000;
 
 // t3 — транспорт T3 Code или функция, которая на каждый такт отдаёт его либо null (переключатель wakeTo в bridge-config.json).
 // routeAi — выбор заказа по смыслу сообщений (route-ai.js): ({ orders, record, news, last }) → { order, why } или null без ключа API.
-function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeAi = null, log = () => {}, now = Date.now, onCollected = () => {} }) {
+// trivialAi — будить ли из-за пустяка клиента: ({ record, news }) → { wake, why } или null без ключа API.
+function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeAi = null, trivialAi = null, log = () => {}, now = Date.now, onCollected = () => {} }) {
   let t3 = null;
   const serviceDir = path.join(targetDir, 'data');
   const statePath = path.join(serviceDir, STATE_FILE);
@@ -310,7 +314,8 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeA
   // salt — у пересланной побудки те же сообщения, но номер другой: диспетчер не примет его за копию.
   function trackPending(state, slug, news, salt = '') {
     const previous = state.pending[slug];
-    if (previous?.key === news.key) {
+    // Придержанный пустяк, который клиент исправил (номер тот же, текст другой), — новая побудка: решение модели не о нём.
+    if (previous?.key === news.key && !(previous.trivial && previous.trivialOf !== textsOf(news))) {
       previous.since ??= now();
       return previous;
     }
@@ -320,8 +325,8 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeA
       key: news.key,
       lastId: news.lastId,
       attempts: 0,
-      // С какого времени диалог ждёт побудки: по нему живая проверка видит застрявшую.
-      since: previous?.since ?? now(),
+      // С какого времени диалог ждёт побудки: по нему живая проверка видит застрявшую. Придержанный пустяк не ждал.
+      since: (!previous?.trivial && previous?.since) || now(),
       nextAt: previous?.sent ? previous.nextAt : now(),
       ...(previous?.sent ? { sent: previous.sent } : {}),
     };
@@ -404,6 +409,33 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeA
   // хранится в ней (item.guess), повторы доставки API не спрашивают. «Работали последним» само себя
   // подкрепляло: пересылка писала в журнал чужого заказа, и следующая побудка шла туда же (16.11.2026,
   // 129 пересылок). Нет ключа — спросит на следующем такте; сбой или «неясно» — где работали последним.
+  // Пустяк клиента («спасибо», «ок» без вопроса и файлов — wakeCore.looksTrivial) агента не будит, если модель
+  // подтвердила, что ответа и действия не нужно: побудка придерживается (отметки не сдвигаются) и уходит вместе
+  // со следующим сообщением клиента. Спрашивается один раз на побудку; нет ключа, сбой или сомнение — будить.
+  // Пересланную агентом побудку не придерживает: агент уже решил, что она нужна другому заказу.
+  async function holdTrivial(state, slug, item, record, news) {
+    if (!trivialAi || item.trivial === false || state.reroute[slug] || !wakeCore.looksTrivial(news, record)) return false;
+    if (item.trivial === undefined) {
+      let answer;
+      try {
+        answer = await trivialAi({ record, news });
+      } catch (error) {
+        log(`побудка ${slug}: проверка пустяка по API не удалась — ${String(error?.message || error).slice(0, 200)}`);
+        answer = { wake: true };
+      }
+
+      if (!answer) return false;
+      item.trivial = !answer.wake;
+      item.trivialOf = textsOf(news);
+      if (item.trivial) log(`побудка ${slug}: пустяк — не будим${answer.why ? ` (${answer.why})` : ''}`);
+    }
+
+    if (!item.trivial) return false;
+    item.nextAt = now() + TRIVIAL_RECHECK_MS;
+    delete item.error;
+    return true;
+  }
+
   async function routeOf(state, slug, item, record, news) {
     const route = routeFor(slug, state, item.guess || null);
     if (route.reason !== 'ambiguous' || item.guess !== undefined || !routeAi) return route;
@@ -612,13 +644,17 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeA
       return;
     }
 
-    const route = await routeOf(state, slug, item, record, news);
     // Чат YouGile без заказа в корень Kwork не будит: строку из списка заказов убрали — чат отключён.
-    if (record.source === 'yougile' && route.root) {
+    if (record.source === 'yougile' && routeFor(slug, state).root) {
       settle(state, slug, news);
       log(`побудка ${slug}: чат YouGile не подключён к заказу — пропущено`);
       return;
     }
+
+    // Пустяк — до выбора заказа: придержанной побудке заказ не нужен, запрос к API о нём был бы впустую.
+    if (await holdTrivial(state, slug, item, record, news)) return;
+
+    const route = await routeOf(state, slug, item, record, news);
 
     if (t3) {
       await wakeT3(state, slug, item, record, news, route);

@@ -134,3 +134,19 @@ test('прокси принял соединение и молчит (VPN-сер
     (error) => error.alert === true && /прокси Claude Code http:\/\/127\.0\.0\.1:\d+ не отвечает — VPN выключен\?/.test(error.message),
   );
 });
+
+test('пустяк: модель видит раннюю переписку и новые сообщения, отвечает «будить или нет»', async () => {
+  const body = routeAi.buildTrivialRequest({ record, news: { messages: [record.messages[2]], events: [] } });
+  const text = body.messages[0].content;
+  assert.deepEqual(Object.keys(body.output_config.format.schema.properties), ['wake', 'why']);
+  assert.match(body.system, /Сомневаешься — буди/);
+  const [early, fresh] = text.split('Новые сообщения');
+  assert.match(early, /Вы: посмотрю/);
+  assert.match(fresh, /а по ломбарду когда\?/);
+
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: '{"wake":false,"why":"благодарность"}' }] }) });
+  assert.deepEqual(await routeAi.classifyTrivial({ apiKey: 'k', record, news, fetchImpl }), { wake: false, why: 'благодарность' });
+  // Ответ оборван — будить: пустяк пропускается только по ясному «нет».
+  const cut = async () => ({ ok: true, status: 200, json: async () => ({ stop_reason: 'max_tokens', content: [] }) });
+  assert.equal((await routeAi.classifyTrivial({ apiKey: 'k', record, news, fetchImpl: cut })).wake, true);
+});

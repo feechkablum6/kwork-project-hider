@@ -120,7 +120,8 @@ async function gather() {
       dispatcher: { configured: Boolean(localId), inDesktop: Boolean(found), pid: open?.pid || null },
       inboundAccept: readJson(join(homedir(), '.claude', 'settings.json'))?.crossSessionInbound === 'accept',
     }),
-    pending: Object.entries(state.pending || {}).map(([slug, item]) => ({ slug, since: item.since || Date.now(), error: item.error || null })),
+    // Придержанный пустяк клиента («спасибо») не застрял: он уйдёт со следующим сообщением.
+    pending: Object.entries(state.pending || {}).filter(([, item]) => !item.trivial).map(([slug, item]) => ({ slug, since: item.since || Date.now(), error: item.error || null })),
     targetDir,
   };
 }

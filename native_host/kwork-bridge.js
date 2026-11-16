@@ -11,7 +11,7 @@ const { createWaker } = require('./waker.js');
 const { createHealthBeat } = require('./health.js');
 const { createClaudeRunner } = require('./claude-runner.js');
 const { createT3Runner } = require('./t3-runner.js');
-const { classifyRoute, claudeCodeProxy } = require('./route-ai.js');
+const { classifyRoute, classifyTrivial, claudeCodeProxy } = require('./route-ai.js');
 
 const CONFIG_PATH = path.join(__dirname, 'bridge-config.json');
 const LOG_PATH = path.join(__dirname, 'bridge.log');
@@ -95,17 +95,21 @@ function startSyncWake() {
     // Побудка в T3 Code — только при "wakeTo": "t3" в bridge-config.json (читается каждый такт,
     // переход и возврат без перезапуска моста); иначе путь Desktop (сокеты, диспетчер).
     t3: () => (readConfig().wakeTo === 't3' ? t3Runner : null),
-    // Заказ по смыслу сообщений — только с ключом API в bridge-config.json ("anthropicApiKey"); без него — где работали последним.
-    routeAi: (input) => {
-      const apiKey = String(readConfig().anthropicApiKey || '').trim();
-      return apiKey ? classifyRoute({ ...input, apiKey, proxy: claudeCodeProxy() }) : null;
-    },
+    // Заказ по смыслу сообщений и пустяки клиента — только с ключом API в bridge-config.json ("anthropicApiKey");
+    // без него — где работали последним, и пустяки будят.
+    routeAi: (input) => askClaude(classifyRoute, input),
+    trivialAi: (input) => askClaude(classifyTrivial, input),
     log,
   });
   setInterval(runWaker, WAKER_TICK_MS).unref();
 }
 
 const WAKER_TICK_MS = 2000;
+
+function askClaude(classify, input) {
+  const apiKey = String(readConfig().anthropicApiKey || '').trim();
+  return apiKey ? classify({ ...input, apiKey, proxy: claudeCodeProxy() }) : null;
+}
 
 function runWaker() {
   waker?.tick().then((done) => done && healthBeat?.wakerDone()).catch((error) => log(`будильщик: ${error?.message || error}`));

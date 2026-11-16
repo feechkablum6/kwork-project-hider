@@ -190,6 +190,22 @@ function findPendingWake(record, handledId) {
   return { lastId: news.lastId, messages };
 }
 
+// Кандидат в пустяки («спасибо», «ок», приветствие): только сообщения клиента, все короткие, без вопроса,
+// файлов, событий Kwork и событий заказа. Решает модель (route-ai.js) — сюда только чтобы не спрашивать её зря.
+// Только Kwork: в YouGile и на FL.ru файл и событие биржи — короткий текст-заглушка, по полям их не отличить.
+// Первое обращение («Здравствуйте») — не пустяк: клиент ждёт ответа, прежде чем написать суть.
+const TRIVIAL_CHARS = 60;
+
+function looksTrivial(news, record) {
+  const messages = news?.messages || [];
+  const fresh = new Set(messages.map((message) => String(message.id)));
+  const earlier = (record?.messages || []).some((message) => !fresh.has(String(message.id)));
+  return !record?.source && earlier && news?.reason === 'client' && messages.length > 0 && (news.events || []).length === 0 && messages.every((message) => {
+    const text = String(message.text || '').trim();
+    return isClientMessage(message, record) && !message.event && !(message.attachments || []).length && text.length <= TRIVIAL_CHARS && !text.includes('?');
+  });
+}
+
 // orders — заказы клиента: [{ name, dir, done }]. Несколько действующих заказов —
 // побудка идёт в тот, где работали последним (workedAt — время последней работы в
 // заказе, мс), или в тот, куда её переслал агент другого заказа (preferred — папка),
@@ -337,6 +353,7 @@ module.exports = {
   formatMoment,
   isClientMessage,
   isRoutedSlug,
+  looksTrivial,
   nickMatch,
   nextAttemptDelayMs,
   parseOrderLine,
