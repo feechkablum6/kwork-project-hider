@@ -1,6 +1,6 @@
 'use strict';
 
-// Побудка в T3 Code (13.11.2026): доставка CLI `t3 thread send/start`, без сокетов и диспетчера Desktop.
+// Побудка в T3 Code (13.11.2026): доставка каналом приложения T3 (steer в идущий ход) и CLI `t3 thread start`, без сокетов и диспетчера Desktop.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -271,16 +271,40 @@ test('t3-runner: свежий чат заказа без задач по рас�
     if (args[1] === 'remove') throw fail("ProjectNotFoundError: No active project found for '/x'.");
     if (args[0] === 'project') throw fail("ProjectAlreadyExistsError: An active project already exists for '/x'.");
     if (args[1] === 'list') return JSON.stringify(threads);
-    if (args[1] === 'send' && args[2] === 'gone') throw fail('Thread gone was not found.');
-    if (args[1] === 'send') return '{"delivery":"queued"}';
     if (args[1] === 'start') return '{"threadId":"mcp:new","projectId":"p"}';
     throw new Error(`unexpected ${args.join(' ')}`);
   };
-  const t3 = createT3Runner({ bin: '/t3', exec });
+  const sent = [];
+  const chats = {
+    e: { archivedAt: null, deletedAt: null },
+    deleted: { archivedAt: null, deletedAt: '2026-11-13T16:41:57Z' },
+    archived: { archivedAt: '2026-11-14T10:00:00Z', deletedAt: null },
+    vanished: { archivedAt: null, deletedAt: null },
+  };
+  const session = async (work) => work({
+    thread: async (id) => {
+      if (!chats[id]) throw new Error(`T3 /api/orchestration/threads/${id}/bounded: 404`);
+      return { projection: { thread: chats[id] } };
+    },
+    dispatch: async (command) => {
+      if (command.threadId === 'vanished') throw new Error('T3 отклонил команду message.dispatch: No orchestration projection exists for thread vanished.');
+      sent.push(command);
+      return { sequence: 1 };
+    },
+  });
+  const t3 = createT3Runner({ bin: '/t3', exec, session });
   assert.equal(await t3.latestThread('/x', 'osetr'), 'e');
   assert.equal(await t3.send('e', 'текст'), true);
-  assert.deepEqual(calls.at(-1), { args: ['thread', 'send', 'e', '-', '--json'], input: 'текст' });
-  assert.equal(await t3.send('gone', 'текст'), false);
+  // Занятый чат получает побудку steer в идущий ход, не в очередь: решает сервер T3 по deliveryIntent 'auto'.
+  assert.equal(sent.at(-1).type, 'message.dispatch');
+  assert.equal(sent.at(-1).deliveryIntent, 'auto');
+  assert.deepEqual([sent.at(-1).threadId, sent.at(-1).text], ['e', 'текст']);
+  // Каждая отправка — свой номер команды: отклонённый T3 номер не залипает на повторах.
+  await t3.send('e', 'текст');
+  assert.notEqual(sent.at(-1).commandId, sent.at(-2).commandId);
+  // Удалённый и архивный чат T3 принял бы молча — для будильщика их нет, как и пропавшего.
+  for (const gone of ['deleted', 'archived', 'missing', 'vanished']) assert.equal(await t3.send(gone, 'текст'), false, gone);
+  assert.equal(sent.length, 2);
   assert.equal(await t3.start('/x', 'osetr', 'первое'), 'mcp:new');
   assert.deepEqual(calls.at(-1).args, ['thread', 'start', '/x', '-', '--title', 'osetr', '--provider', 'claudeAgent', '--model', 'claude-opus-5-5', '--json']);
   assert.equal(t3.threadId('11111111-2222-4333-8444-555555555555'), 'import:claudeAgent:11111111-2222-4333-8444-555555555555');
@@ -288,8 +312,9 @@ test('t3-runner: свежий чат заказа без задач по рас�
   await t3.removeProject('/x');
   assert.deepEqual(calls.at(-1).args, ['project', 'remove', '--force', '/x']);
 
-  // Другая ошибка CLI — не «удалён»: наружу, будильщик повторит.
-  const broken = createT3Runner({ bin: '/t3', exec: async () => { throw fail('connect ECONNREFUSED'); } });
+  // Другая ошибка — не «удалён»: наружу, будильщик повторит.
+  const refused = async () => { throw fail('connect ECONNREFUSED'); };
+  const broken = createT3Runner({ bin: '/t3', exec: refused, session: refused });
   await assert.rejects(broken.send('e', 'x'), /ECONNREFUSED/);
   await assert.rejects(broken.removeProject('/x'), /ECONNREFUSED/);
 });

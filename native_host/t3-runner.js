@@ -1,13 +1,15 @@
 'use strict';
 
-// Транспорт побудки в T3 Code через его CLI (13.11.2026: пользователь ушёл с Claude Desktop на T3).
-// T3 сам держит очередь чата: занятый чат получает сообщение следующим ходом, спящий — сразу,
-// поэтому ни сокетов, ни диспетчера не нужно: принятое сервером T3 считается доставленным.
+// Транспорт побудки в T3 Code (13.11.2026: пользователь ушёл с Claude Desktop на T3): чаты и проекты — CLI,
+// сообщение — канал приложения T3 (`t3-client.js`): занятый чат получает его steer в идущий ход, свободный —
+// сразу новым ходом. Ни сокетов, ни диспетчера не нужно: принятое сервером T3 считается доставленным.
 
 const { execFile, execFileSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { messageCommand, withT3 } = require('./t3-client');
 
 const T3_TIMEOUT_MS = 30 * 1000;
 // Новый чат при холодном T3 стартует дольше; убитый по сроку старт мог успеть завести чат — повтор дал бы второй.
@@ -41,7 +43,13 @@ function serverPid(home) {
   }
 }
 
-function createT3Runner({ home = os.homedir(), bin = path.join(home, '.t3', 'bin', 't3'), exec = run, server = () => serverPid(home) } = {}) {
+function createT3Runner({
+  home = os.homedir(),
+  bin = path.join(home, '.t3', 'bin', 't3'),
+  exec = run,
+  server = () => serverPid(home),
+  session = withT3,
+} = {}) {
   const t3 = (args, input, timeout) => exec(bin, args, input, timeout);
 
   // Папка без своего проекта T3 отдала бы чаты проекта-родителя (корня Kwork): проект заводим заранее.
@@ -67,13 +75,27 @@ function createT3Runner({ home = os.homedir(), bin = path.join(home, '.t3', 'bin
       own.sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
       return own[0]?.threadId || null;
     },
-    // → true: T3 принял сообщение; false: такого чата в T3 нет (удалён) — нужен другой.
+    // → true: T3 принял сообщение; false: такого чата в T3 нет (удалён, в архиве) — нужен другой.
+    // deliveryIntent 'auto' (messageCommand): идёт ход — steer в него, нет — новый ход сразу; `t3 thread send`
+    // умеет только очередь. message.dispatch удалённый и архивный чат не проверяет (CLI через MCP проверял) —
+    // читаем чат сами. Номер команды свежий, как у CLI: отказ T3 по старому номеру залип бы до нового сообщения.
     async send(threadId, text) {
       try {
-        await t3(['thread', 'send', threadId, '-', '--json'], text);
-        return true;
+        return await session(async (t3) => {
+          let thread;
+          try {
+            thread = (await t3.thread(threadId)).projection?.thread;
+          } catch (error) {
+            if (/: 404$/.test(error.message)) return false;
+            throw error;
+          }
+          if (!thread) throw new Error(`T3 не отдал чат ${threadId}`);
+          if (thread.deletedAt || thread.archivedAt) return false;
+          await t3.dispatch(messageCommand({ seed: crypto.randomUUID(), threadId, text }));
+          return true;
+        });
       } catch (error) {
-        if (/was not found/.test(error.t3 || '')) return false;
+        if (/No orchestration projection exists/.test(error.message)) return false;
         throw error;
       }
     },
