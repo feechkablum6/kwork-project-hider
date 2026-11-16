@@ -67,6 +67,7 @@ const RELAY_RESET_MS = 60 * 60 * 1000;
 // (ни подсказок модели, ни искажений при переписывании). Файлы старше WAKE_TEXT_KEEP_MS удаляются.
 const WAKE_TEXTS_DIR = 'wake-texts';
 const WAKE_TEXT_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+const ROUTE_ALERT_MS = 6 * 60 * 60 * 1000;
 // Разрыв между тактами больше этого — мак спал: ожидание метки сдвигается на время сна.
 const SLEEP_GAP_MS = 30 * 1000;
 
@@ -153,7 +154,8 @@ const T3_IMPORT = 'import:claudeAgent:';
 const T3_WAIT_MS = 10 * 1000;
 
 // t3 — транспорт T3 Code или функция, которая на каждый такт отдаёт его либо null (переключатель wakeTo в bridge-config.json).
-function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, log = () => {}, now = Date.now, onCollected = () => {} }) {
+// routeAi — выбор заказа по смыслу сообщений (route-ai.js): ({ orders, record, news, last }) → { order, why } или null без ключа API.
+function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeAi = null, log = () => {}, now = Date.now, onCollected = () => {} }) {
   let t3 = null;
   const serviceDir = path.join(targetDir, 'data');
   const statePath = path.join(serviceDir, STATE_FILE);
@@ -169,6 +171,7 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, log = 
   let dispatcherOpenAt = 0;
   let cleanedAt = 0;
   let lastTickAt = 0;
+  let routeAlertAt = 0;
 
   function readRecord(slug) {
     return readJson(path.join(targetDir, slug, core.DIALOG_DATA_NAME));
@@ -385,7 +388,7 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, log = 
     return claimed;
   }
 
-  function routeFor(slug, state) {
+  function routeFor(slug, state, guessed = null) {
     return wakeCore.planRoute({
       orders: ordersForNick(slug),
       kworkRoot,
@@ -393,7 +396,35 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, log = 
       // Где работали последним — по самому свежему журналу в папке заказа, чаты пользователя тоже в счёт.
       workedAt: (order) => runner.lastActivity(order.dir),
       preferred: state.reroute[slug] || null,
+      guessed,
     });
+  }
+
+  // Несколько заказов клиента — заказ по смыслу сообщений выбирает модель, один раз на побудку: ответ
+  // хранится в ней (item.guess), повторы доставки API не спрашивают. «Работали последним» само себя
+  // подкрепляло: пересылка писала в журнал чужого заказа, и следующая побудка шла туда же (16.11.2026,
+  // 129 пересылок). Нет ключа — спросит на следующем такте; сбой или «неясно» — где работали последним.
+  async function routeOf(state, slug, item, record, news) {
+    const route = routeFor(slug, state, item.guess || null);
+    if (route.reason !== 'ambiguous' || item.guess !== undefined || !routeAi) return route;
+    const lastKey = state.delivered[slug]?.at(-1)?.key;
+    try {
+      const answer = await routeAi({ orders: route.orders, record, news, last: route.orders.find((order) => order.dir === lastKey) || null });
+      if (!answer) return route;
+      item.guess = answer.order?.dir || null;
+      log(`побудка ${slug}: заказ по смыслу — ${answer.order?.name || 'неясно'}${answer.why ? ` (${answer.why})` : ''}`);
+    } catch (error) {
+      item.guess = null;
+      const why = String(error?.message || error).slice(0, 200);
+      log(`побудка ${slug}: выбор заказа по API не удался — ${why}`);
+      // Ключ отозван или кончился баланс (4xx, кроме 429): сам не пройдёт — уведомление, не чаще раза в 6 часов.
+      if (error?.status >= 400 && error.status < 500 && error.status !== 429 && now() - routeAlertAt > ROUTE_ALERT_MS) {
+        routeAlertAt = now();
+        runner.notify({ title: 'Kwork: выбор заказа по API не работает', message: `${why}. Побудки идут туда, где работали последним.`, group: 'kph-route-ai' });
+      }
+    }
+
+    return item.guess ? routeFor(slug, state, item.guess) : route;
   }
 
   // Отметка «ждём клиента» снимается любым разобранным действием по маршруту.
@@ -573,7 +604,15 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, log = 
       return;
     }
 
-    const route = routeFor(slug, state);
+    // T3 закрыт — побудка ждёт без счёта попыток: сбоем это не считаем, иначе повторы ушли бы на 30 минут.
+    // Проверка до выбора заказа: каждое сообщение, пока T3 закрыт, — новая побудка и запрос к API впустую.
+    if (t3 && !t3.serverPid()) {
+      item.nextAt = now() + T3_WAIT_MS;
+      item.error = 'T3 Code закрыт';
+      return;
+    }
+
+    const route = await routeOf(state, slug, item, record, news);
     // Чат YouGile без заказа в корень Kwork не будит: строку из списка заказов убрали — чат отключён.
     if (record.source === 'yougile' && route.root) {
       settle(state, slug, news);
@@ -719,13 +758,6 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, log = 
   async function wakeT3(state, slug, item, record, news, route) {
     const nick = record.key || slug;
     const name = route.order?.name || nick;
-    // T3 закрыт — побудка ждёт без счёта попыток: сбоем это не считаем, иначе повторы ушли бы на 30 минут.
-    if (!t3.serverPid()) {
-      item.nextAt = now() + T3_WAIT_MS;
-      item.error = 'T3 Code закрыт';
-      return;
-    }
-
     const saved = state.chats[route.key];
     const known = saved ? t3.threadId(saved.sessionId) : null;
     // Импортированный чат T3 — тот же сеанс Claude, что чат Desktop: пока Desktop держит его процесс,

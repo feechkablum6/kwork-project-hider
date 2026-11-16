@@ -61,6 +61,11 @@ test('два действующих заказа — побудка идёт в 
   const moved = wakeCore.planRoute({ orders: [park, shop], kworkRoot: '/k', slug: 'ivan', workedAt, preferred: park.dir });
   assert.deepEqual([moved.order.name, moved.reason], ['park', 'rerouted']);
   assert.equal(wakeCore.planRoute({ orders: [park, shop], kworkRoot: '/k', slug: 'ivan', workedAt, preferred: '/k/Активные/other' }).reason, 'ambiguous');
+  // Заказ по смыслу сообщений (модель) важнее «работали последним», пересылка агента — важнее модели.
+  const guessed = wakeCore.planRoute({ orders: [park, shop], kworkRoot: '/k', slug: 'ivan', workedAt, guessed: park.dir });
+  assert.deepEqual([guessed.order.name, guessed.reason], ['park', 'guessed']);
+  assert.equal(wakeCore.planRoute({ orders: [park, shop], kworkRoot: '/k', slug: 'ivan', workedAt, preferred: shop.dir, guessed: park.dir }).reason, 'rerouted');
+  assert.equal(wakeCore.planRoute({ orders: [park, shop], kworkRoot: '/k', slug: 'ivan', workedAt, guessed: '/k/Активные/other' }).reason, 'ambiguous');
 });
 
 test('клиент без заказа — корень Kwork, у каждого клиента свой ключ маршрута', () => {
@@ -99,7 +104,7 @@ test('побудка при нескольких заказах: чужое со
   assert.doesNotMatch(text, /t3_|T3|settled/);
 });
 
-function createWorld({ now } = {}) {
+function createWorld({ now, routeAi } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-wake-'));
   const kworkRoot = path.join(home, 'Kwork');
   const targetDir = path.join(kworkRoot, 'переписки');
@@ -114,7 +119,7 @@ function createWorld({ now } = {}) {
   const save = (messages) => handleCommand(targetDir, { command: 'save-dialog', dialog: { key: 'ivan', clientId: '501', messages } });
   const claude = createFakeClaude({ home, now });
   const logs = [];
-  const waker = createWaker({ targetDir, kworkRoot, runner: claude.runner, log: (line) => logs.push(line), ...(now ? { now } : {}) });
+  const waker = createWaker({ targetDir, kworkRoot, runner: claude.runner, routeAi, log: (line) => logs.push(line), ...(now ? { now } : {}) });
   const stateOf = () => JSON.parse(fs.readFileSync(path.join(targetDir, 'data', 'wake-state.json'), 'utf8'));
   // Диспетчер в Desktop: открыт (open = true) или только в списке Desktop, без процесса.
   const dispatcher = ({ open = true } = {}) => (open ? claude.openDispatcher(dispatcherDir) : claude.addToDesktop('disp-cli', { cwd: dispatcherDir }));
@@ -823,9 +828,9 @@ test('при двух заказах побудка идёт в тот, где �
 });
 
 // Клиент с двумя заказами, оба чата открыты в Desktop; в shop работали последним.
-async function worldWithTwoOrders() {
+async function worldWithTwoOrders({ routeAi } = {}) {
   let clock = Date.parse('2026-10-14T10:00:00Z');
-  const world = createWorld({ now: () => clock });
+  const world = createWorld({ now: () => clock, routeAi });
   const parkDir = path.join(world.kworkRoot, 'Активные', 'park');
   fs.mkdirSync(parkDir);
   fs.writeFileSync(path.join(world.kworkRoot, 'docs', 'заказы-клиенты.md'), '- shop: ivan\n- park: ivan\n');
@@ -889,6 +894,76 @@ test('сообщение про другой заказ клиента: аген
   await world.waker.tick();
   assert.match(world.logs.at(-1), /отклонена — побудки #\w+ нет среди доставленных/);
   assert.equal(world.claude.inbox.length, 2);
+  world.claude.closeDesktopChats();
+});
+
+test('при двух заказах заказ по смыслу сообщений выбирает модель — один раз на побудку; нет ответа — где работали последним', async () => {
+  const asked = [];
+  let answer = (input) => ({ order: input.orders.find((order) => order.name === 'park'), why: 'про парковку' });
+  const { world, advance } = await worldWithTwoOrders({ routeAi: async (input) => { asked.push(input); return answer(input); } });
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'шлагбаум не открывается')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(1);
+  const first = world.claude.inbox[0];
+  assert.equal(first.sessionId, 'park-chat');
+  assert.match(first.user.message.content, /выбрала модель по смыслу/);
+  // Ошиблась — агент может переслать.
+  assert.match(first.user.message.content, /kwork-reroute\.mjs ivan/);
+  assert.equal(asked.length, 1);
+  assert.deepEqual(asked[0].orders.map((order) => order.name).sort(), ['park', 'shop']);
+  assert.deepEqual(asked[0].news.messages.map((item) => item.text), ['шлагбаум не открывается']);
+  assert.match(world.logs.join('\n'), /заказ по смыслу — park \(про парковку\)/);
+  advance(2000);
+  await world.waker.tick();
+  assert.equal(world.stateOf().pending.ivan, undefined);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].last, null);
+
+  // Сбой API — побудка не ждёт и не спрашивает снова: туда, где работали последним (shop).
+  answer = () => { throw new Error('API 529'); };
+  advance(60 * 1000);
+  world.claude.say(world.orderDir, 'shop-chat', Date.parse('2026-10-14T10:00:00Z') + 2 * 60 * 1000);
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'шлагбаум не открывается'), message(3, 9, 'client', 'и ещё')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(2);
+  assert.equal(world.claude.inbox[1].sessionId, 'shop-chat');
+  assert.match(world.claude.inbox[1].user.message.content, /работали последним/);
+  assert.equal(asked.length, 2);
+  // Прошлая побудка ушла в park — модель это знает.
+  assert.equal(asked[1].last?.name, 'park');
+  assert.match(world.logs.join('\n'), /выбор заказа по API не удался — API 529/);
+  advance(2000);
+  await world.waker.tick();
+  assert.equal(asked.length, 2);
+  world.claude.closeDesktopChats();
+});
+
+test('без ключа API (routeAi вернул null) выбор заказа — как раньше, и спросит, когда ключ появится', async () => {
+  let calls = 0;
+  const { world } = await worldWithTwoOrders({ routeAi: () => { calls += 1; return null; } });
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'вопрос')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(1);
+  assert.equal(world.claude.inbox[0].sessionId, 'shop-chat');
+  assert.equal(calls, 1);
+  world.claude.closeDesktopChats();
+});
+
+test('ключ API не работает (кончился баланс) — одно уведомление за 6 часов, побудки идут как раньше', async () => {
+  const { world, advance } = await worldWithTwoOrders({ routeAi: async () => { throw Object.assign(new Error('API 400: credit balance is too low'), { status: 400 }); } });
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'вопрос')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(1);
+  assert.equal(world.claude.inbox[0].sessionId, 'shop-chat');
+  const alerts = () => world.claude.notified.filter((note) => note.group === 'kph-route-ai');
+  assert.equal(alerts().length, 1);
+  assert.match(alerts()[0].message, /credit balance is too low\. Побудки идут туда, где работали последним/);
+  advance(2000);
+  await world.waker.tick();
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'вопрос'), message(3, 8, 'client', 'ещё')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(2);
+  assert.equal(alerts().length, 1);
   world.claude.closeDesktopChats();
 });
 

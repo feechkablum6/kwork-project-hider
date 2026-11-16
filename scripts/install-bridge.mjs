@@ -274,7 +274,14 @@ function writeBridgeConfig(targetDir, projectsDir) {
   mkdirSync(targetDir, { recursive: true });
   mkdirSync(projectsDir, { recursive: true });
   const configPath = join(projectRoot, 'native_host', 'bridge-config.json');
-  writeFileSync(configPath, `${JSON.stringify({ targetDir, projectsDir }, null, 2)}\n`, 'utf8');
+  // Прочие настройки (wakeTo, ключ API) переустановка не стирает.
+  let previous = {};
+  try {
+    previous = JSON.parse(readFileSync(configPath, 'utf8'));
+  } catch {
+    // Настройки ещё нет.
+  }
+  writeFileSync(configPath, `${JSON.stringify({ ...previous, targetDir, projectsDir }, null, 2)}\n`, 'utf8');
   return configPath;
 }
 

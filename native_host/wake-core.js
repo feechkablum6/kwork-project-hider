@@ -192,16 +192,18 @@ function findPendingWake(record, handledId) {
 
 // orders — заказы клиента: [{ name, dir, done }]. Несколько действующих заказов —
 // побудка идёт в тот, где работали последним (workedAt — время последней работы в
-// заказе, мс), или в тот, куда её переслал агент другого заказа (preferred — папка);
+// заказе, мс), или в тот, куда её переслал агент другого заказа (preferred — папка),
+// или в тот, что выбрала модель по смыслу сообщений (guessed — папка; пересылка агента важнее);
 // текст называет остальные, чтобы агент не работал по чужому заказу.
 // Клиент без заказа — корень Kwork: чат у каждого клиента свой (key с ником).
-function planRoute({ orders, kworkRoot, slug = '', workedAt = () => 0, preferred = null }) {
+function planRoute({ orders, kworkRoot, slug = '', workedAt = () => 0, preferred = null, guessed = null }) {
   const active = (orders || []).filter((order) => !order.done);
   const done = (orders || []).filter((order) => order.done);
   const pool = active.length > 0 ? active : done;
   const chosen = preferred ? pool.find((order) => order.dir === preferred) : null;
-  const reason = pool.length === 0 ? 'no-order' : pool.length === 1 ? null : chosen ? 'rerouted' : 'ambiguous';
-  const order = chosen || [...pool].sort((left, right) => workedAt(right) - workedAt(left))[0] || null;
+  const guess = !chosen && guessed ? pool.find((order) => order.dir === guessed) : null;
+  const reason = pool.length === 0 ? 'no-order' : pool.length === 1 ? null : chosen ? 'rerouted' : guess ? 'guessed' : 'ambiguous';
+  const order = chosen || guess || [...pool].sort((left, right) => workedAt(right) - workedAt(left))[0] || null;
   return order
     ? { dir: order.dir, key: order.dir, reason, order, orders: pool }
     : { dir: kworkRoot, key: `${kworkRoot}::${slug}`, root: true, reason, order: null, orders: pool };
@@ -221,12 +223,17 @@ function clip(text, limit) {
 
 // reroute — команда пересылки этой побудки в другой заказ без имени заказа: `node …/kwork-reroute.mjs <диалог> <номер>`.
 // Пересланную побудку дальше не пересылают: так она не ходит по кругу.
+const ROUTE_WHY = {
+  ambiguous: 'Сюда побудка пришла, потому что в этом заказе работали последним.',
+  guessed: 'Этот заказ для побудки выбрала модель по смыслу сообщений.',
+};
+
 function routeLines(route, reroute) {
-  if (route.reason === 'ambiguous' || route.reason === 'rerouted') {
+  if (ROUTE_WHY[route.reason] || route.reason === 'rerouted') {
     const others = route.orders.filter((order) => order !== route.order);
     const what = route.reason === 'rerouted'
       ? 'Сюда побудку переслал агент другого заказа клиента: по его словам, сообщение про этот заказ. Если и это не так — не пересылай дальше: одной строкой напиши пользователю, к какому заказу оно относится, и остановись.'
-      : `Сюда побудка пришла, потому что в этом заказе работали последним. Если сообщение про другой заказ — не работай по нему здесь: перешли побудку туда командой \`${reroute} <имя заказа>\` (имя — как выше), одной строкой напиши пользователю, к какому заказу оно относится, и остановись.`;
+      : `${ROUTE_WHY[route.reason]} Если сообщение про другой заказ — не работай по нему здесь: перешли побудку туда командой \`${reroute} <имя заказа>\` (имя — как выше), одной строкой напиши пользователю, к какому заказу оно относится, и остановись.`;
     return [
       `Заказ ${route.order.name}: папка ${route.order.dir}.`,
       `У клиента есть и другие заказы: ${others.map((order) => `${order.name} (${order.dir})`).join(', ')}. ${what}`,
