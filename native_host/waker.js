@@ -710,6 +710,7 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeA
       try {
         await send(item, { via: 'socket', sessionId: open.sessionId, dir: open.cwd, routeKey: route.key }, news, () => runner.deliver(open, text));
         state.chats[route.key] = { sessionId: open.sessionId, dir: open.cwd, nick, startedAt: now() };
+        if (route.order) delete state.chats[`${kworkRoot}::${slug}`];
         log(`побудка ${slug}: ${news.reason}, в чат, открытый в Desktop`);
         return;
       } catch (error) {
@@ -755,6 +756,7 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeA
 
       await send(item, { via: 'dispatcher', sessionId, dir, routeKey: route.key, dispatcher: { sessionId: info.sessionId, cwd: info.cwd } }, news, () => runner.deliver(dispatcher, dispatchText(item, target, text)));
       state.chats[route.key] = { sessionId, dir, nick, startedAt: now() };
+      if (route.order) delete state.chats[`${kworkRoot}::${slug}`];
       log(`побудка ${slug}: ${news.reason}, через диспетчера${target.archived ? ' (чат в архиве)' : ''}${route.reason ? ` (${route.reason})` : ''}`);
       return;
     }
