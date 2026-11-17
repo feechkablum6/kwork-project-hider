@@ -685,6 +685,10 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeA
     let dir = chat?.dir || route.dir;
     const named = !sessionId && route.order ? namedChat(desktop, route.order.name) : null;
     if (named) [sessionId, dir] = named;
+    // Чат до заказа, записанный путём T3, — номер Desktop без «import:…»; свой чат T3 Desktop не знает.
+    const preId = String(state.chats[`${kworkRoot}::${slug}`]?.sessionId || '').replace(T3_IMPORT, '');
+    const early = !sessionId && desktop.has(preId) ? adoptPreOrder(state, slug, route) : null;
+    if (early) [sessionId, dir] = [preId, early.dir];
     const file = runner.transcript(dir, sessionId);
 
     // Своё сообщение или свои опции без чата клиента — новый чат ради них не заводится:
@@ -789,7 +793,7 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeA
   }
 
   // Побудка в T3 Code. Чат заказа один: наш прошлый (номер чата Desktop — импортированный чат T3), иначе
-  // самый свежий чат проекта заказа в T3; клиент без заказа — только свой чат в корне Kwork. Чата нет —
+  // самый свежий чат проекта заказа в T3, иначе чат клиента до заказа; без заказа — только свой чат в корне Kwork. Чата нет —
   // новый чат T3 с побудкой первым сообщением. T3 принял — побудка разобрана: очередь чата держит сервер T3.
   async function wakeT3(state, slug, item, record, news, route) {
     const nick = record.key || slug;
@@ -808,9 +812,11 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeA
       runner.notify({ title: `Kwork: ${nick} ждёт`, message: `Чат «${name}» ещё открыт в Claude Desktop — закройте Desktop, побудка уйдёт в T3 Code`, group: `kph-desktop-${slug}` });
     };
     const text = wakeText(slug, item, record, news, route, nick);
-    const delivered = (threadId, how) => {
+    const delivered = (threadId, how, dir = threadId === known ? saved.dir : route.dir) => {
       // Прежний чат остаётся в своей папке (чат заказа мог жить в корне Kwork): по ней путь Desktop ищет журнал.
-      state.chats[route.key] = { sessionId: threadId, dir: threadId === known ? saved.dir : route.dir, nick, startedAt: now() };
+      state.chats[route.key] = { sessionId: threadId, dir, nick, startedAt: now() };
+      // Заказ живёт в своём чате — чат до заказа следующему заказу клиента не достаётся.
+      if (route.order) delete state.chats[`${kworkRoot}::${slug}`];
       const released = release(state, route.key);
       settle(state, slug, news, { wakeId: item.wakeId, key: route.key });
       log(`побудка ${slug}: ${news.reason}, ${how}${route.reason ? ` (${route.reason})` : ''}${released}`);
@@ -821,6 +827,10 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeA
     const latest = route.order ? await t3.latestThread(route.dir, name) : null;
     if (latest && latest !== known && heldInDesktop(latest, route.dir)) return wait(latest);
     if (latest && latest !== known && await t3.send(latest, text)) return delivered(latest, 'в свежий чат заказа в T3');
+    const early = adoptPreOrder(state, slug, route);
+    const earlyId = early ? t3.threadId(early.sessionId) : null;
+    if (earlyId && earlyId !== known && heldInDesktop(earlyId, early.dir)) return wait(earlyId);
+    if (earlyId && earlyId !== known && await t3.send(earlyId, text)) return delivered(earlyId, 'в чат клиента до заказа', early.dir);
 
     // Своё сообщение или свои опции без чата клиента — новый чат ради них не заводится.
     const clientActed = news.reason === 'client' || news.events.some((event) => event.actor !== 'me');
@@ -833,6 +843,17 @@ function createWaker({ targetDir, kworkRoot, runner, t3: t3Source = null, routeA
     const threadId = await t3.start(route.dir, name, text);
     delivered(threadId, `новый чат T3 «${name}»`);
     runner.notify({ title: `Kwork: новый чат ${nick}`, message: `Клиент написал — чат «${name}» в T3 Code`, activate: T3_BUNDLE, group: `kph-${threadId}` });
+  }
+
+  // Клиент оформил заказ после разговора в корне Kwork, а у заказа нет ни нашего, ни свежего чата: чат до заказа
+  // и есть чат заказа (17.11.2026 вместо него заводился новый). Запись переезжает в ключ заказа один раз → она или null.
+  function adoptPreOrder(state, slug, route) {
+    const preOrder = `${kworkRoot}::${slug}`;
+    const entry = route.order ? state.chats[preOrder] : null;
+    if (!entry) return null;
+    state.chats[route.key] = entry;
+    delete state.chats[preOrder];
+    return entry;
   }
 
   // Чат Desktop с названием заказа в папке Kwork: [номер CLI, папка] или null; не из архива — первым.

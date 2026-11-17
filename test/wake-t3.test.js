@@ -159,6 +159,37 @@ test('T3: клиент без заказа — свой новый чат в к�
   assert.equal(world.t3.started[0].title, 'ivan');
 });
 
+test('T3: клиент оформил первый заказ — разговор продолжается в его чате до заказа, нового чата нет', async () => {
+  const world = createWorld({ orders: '' });
+  await clientWrites(world);
+  const [before] = world.t3.started;
+  assert.equal(before.dir, world.kworkRoot);
+
+  fs.writeFileSync(path.join(world.kworkRoot, 'docs', 'заказы-клиенты.md'), '- shop: ivan\n');
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'новое'), message(3, 6, 'client', 'заказ оформил')]);
+  world.advance(2000);
+  await world.waker.tick();
+
+  assert.equal(world.t3.started.length, 1);
+  assert.deepEqual(world.t3.sent.map((item) => item.threadId), [before.threadId]);
+  const { chats } = world.stateOf();
+  assert.equal(chats[world.orderDir].sessionId, before.threadId);
+  assert.equal(chats[world.orderDir].dir, world.kworkRoot);
+  assert.equal(chats[`${world.kworkRoot}::ivan`], undefined);
+});
+
+test('T3: у заказа уже есть свежий чат папки — побудка туда, а не в чат до заказа', async () => {
+  const world = createWorld({ orders: '' });
+  await clientWrites(world);
+  fs.writeFileSync(path.join(world.kworkRoot, 'docs', 'заказы-клиенты.md'), '- shop: ivan\n');
+  world.t3.threads[world.orderDir] = 'mcp:order-work';
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'новое'), message(3, 6, 'client', 'ещё')]);
+  world.advance(2000);
+  await world.waker.tick();
+  assert.deepEqual(world.t3.sent.map((item) => item.threadId), ['mcp:order-work']);
+  assert.equal(world.t3.started.length, 1);
+});
+
 test('T3 не ответил — сбой в журнал и повтор, побудка не теряется', async () => {
   const world = createWorld();
   world.t3.fail = new Error('t3 thread start: connect ECONNREFUSED');

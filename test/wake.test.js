@@ -763,6 +763,29 @@ test('заказ заведён из чата в корне Kwork, в папке
   world.claude.closeDesktopChats();
 });
 
+test('клиент оформил заказ после разговора в корне Kwork (чат записан путём T3) — побудка в тот же чат Desktop, нового чата нет', async () => {
+  let clock = Date.parse('2026-10-14T10:00:00Z');
+  const world = createWorld({ now: () => clock });
+  world.save([message(1, 0, 'me', 'жду')]);
+  await world.waker.tick();
+  const statePath = path.join(world.targetDir, 'data', 'wake-state.json');
+  const state = world.stateOf();
+  state.chats[`${world.kworkRoot}::ivan`] = { sessionId: 'import:claudeAgent:pre-chat', dir: world.kworkRoot, nick: 'ivan', startedAt: 0 };
+  fs.writeFileSync(statePath, JSON.stringify(state));
+  world.claude.say(world.kworkRoot, 'pre-chat', clock - 60 * 1000);
+  world.claude.addToDesktop('pre-chat', { cwd: world.kworkRoot, title: 'ivan' });
+  world.claude.openDesktopChat(world.kworkRoot, 'pre-chat');
+  world.save([message(1, 0, 'me', 'жду'), message(2, 5, 'client', 'заказ оформил')]);
+  await world.waker.tick();
+  await world.claude.waitInbox(1);
+  assert.equal(world.claude.inbox[0].sessionId, 'pre-chat');
+  const { chats } = world.stateOf();
+  assert.equal(chats[world.orderDir].sessionId, 'pre-chat');
+  assert.equal(chats[`${world.kworkRoot}::ivan`], undefined);
+  assert.deepEqual(world.claude.opened, []);
+  world.claude.closeDesktopChats();
+});
+
 test('клиент без заказа, а в корне Kwork открыт чужой чат пользователя — туда побудка не идёт, у клиента свой новый чат', async () => {
   const clock = Date.parse('2026-10-14T10:00:00Z');
   const world = createWorld({ now: () => clock });
