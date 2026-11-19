@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Будит чат заказа в T3, когда в группе Telegram клиента появилось новое входящее сообщение.
-// Запуск раз в минуту из LaunchAgent: node tg-group-watch.mjs <id чата в Chat HUB> <папка заказа>
+// Запуск раз в минуту из LaunchAgent: node tg-group-watch.mjs <id чата в Chat HUB> <папка заказа> [чат T3]
+// Без третьего аргумента будит чат заказа из wake-state.json (куда идут побудки Kwork).
 // Самопроверка: node tg-group-watch.mjs --selftest
 // shortcut: нет проверки heldInDesktop будильщика (waker.js) — годится для чатов T3 (mcp:…); заказу с чатом,
 // импортированным из Desktop, сначала перенести эту проверку.
@@ -38,7 +39,7 @@ function wakeText(orderDir, fresh, gap = false) {
   ].join('\n');
 }
 
-async function main(chatId, orderDir) {
+async function main(chatId, orderDir, pinned) {
   const statePath = path.join(os.homedir(), `.claude/tools/tg-group-watch-${chatId}.json`);
   const response = await fetch(`http://127.0.0.1:8737/api/chats/${chatId}/messages?limit=${LIMIT}`, {
     headers: { Authorization: `Bearer ${fs.readFileSync(TOKEN_PATH, 'utf8').trim()}` },
@@ -74,7 +75,7 @@ async function main(chatId, orderDir) {
   // самый свежий чат проекта заказа, нет и его — новый чат, как делает будильщик (waker.js, wakeT3).
   const runner = createT3Runner();
   const title = path.basename(orderDir);
-  const known = JSON.parse(fs.readFileSync(WAKE_STATE, 'utf8')).chats?.[orderDir]?.sessionId;
+  const known = pinned || JSON.parse(fs.readFileSync(WAKE_STATE, 'utf8')).chats?.[orderDir]?.sessionId;
   let threadId = known ? runner.threadId(known) : null;
   if (!threadId || !(await runner.send(threadId, text))) {
     threadId = await runner.latestThread(orderDir, title);
@@ -96,12 +97,12 @@ if (process.argv[2] === '--selftest') {
   assert.match(wakeText('/x/o', [{ id: 9, sent_at: 0, text: null, media: null }]), /\?: \(без текста\)\n/);
   console.log('ok');
 } else {
-  const [chatId, orderDir] = process.argv.slice(2);
+  const [chatId, orderDir, pinned] = process.argv.slice(2);
   if (!/^\d+$/.test(chatId || '') || !orderDir) {
-    console.error('usage: tg-group-watch.mjs <id чата Chat HUB> <папка заказа>');
+    console.error('usage: tg-group-watch.mjs <id чата Chat HUB> <папка заказа> [чат T3]');
     process.exit(2);
   }
-  main(chatId, orderDir).catch((error) => {
+  main(chatId, orderDir, pinned).catch((error) => {
     console.error(`${new Date().toISOString()} ${error.message}`);
     process.exit(1);
   });
