@@ -444,6 +444,10 @@
     const id = firstFilledKey(raw, ID_KEYS);
     const time = normalizeTime(firstFilledKey(raw, TIME_KEYS));
     const orderId = firstFilledKey(raw, ['order_id', 'orderId']);
+    // MID — номер в ленте Kwork: у getnewmessages он и есть id, у обычной выгрузки id другой.
+    const mid = Number(raw.MID) > 0 ? String(Number(raw.MID)) : null;
+    // Kwork ставит updated_at правленому сообщению и отдаёт уже новый текст.
+    const editedAt = normalizeTime(raw.updated_at);
 
     return {
       id: id === null ? null : String(id),
@@ -458,6 +462,8 @@
       // Поля без значения не пишутся: при склейке копия без них не затирает полную.
       ...(orderId !== null ? { orderId: String(orderId) } : {}),
       ...(event ? { event } : {}),
+      ...(mid ? { mid } : {}),
+      ...(editedAt ? { editedAt } : {}),
     };
   }
 
@@ -748,6 +754,7 @@
         recipientName: previous.recipientName || message.recipientName,
         attachments: previous.attachments?.length ? previous.attachments : message.attachments,
         replyTo: previous.replyTo || message.replyTo || null,
+        ...mergeChanges(previous, message),
       });
     }
 
@@ -767,8 +774,41 @@
       || !withId.has(`${message.time || ''}|${message.authorId}|${(message.text || '').trim()}`));
   }
 
+  // Правленая реплика уже не склеится по тексту: свою копию она находит по MID. Номера двух лент
+  // Kwork могут совпасть у разных реплик — копией считается только реплика того же автора и времени.
+  function findByMid(message, known, byMid) {
+    if (!message.mid) {
+      return null;
+    }
+
+    const key = byMid.get(message.mid) || `id:${message.mid}`;
+    const previous = known.get(key);
+    return previous && previous.authorId === message.authorId && previous.time === message.time ? key : null;
+  }
+
+  // Прежний текст правленого сообщения уходит в edits. Правка — только с новой отметкой Kwork:
+  // разница в тексте без неё — смена разбора, а не правка. Копия старше известной правки (вкладка
+  // Kwork видела сообщение до неё) текст не откатывает. История правок копий объединяется: вкладка
+  // знает не все правки, и короткий список не должен затирать полный.
+  function mergeChanges(previous, message) {
+    const stale = Boolean(previous.editedAt) && !(message.editedAt >= previous.editedAt);
+    const edited = !stale && message.editedAt && message.editedAt !== previous.editedAt && previous.text && message.text !== previous.text;
+    const seen = new Set();
+    const edits = [...(previous.edits || []), ...(message.edits || []), ...(edited ? [{ text: previous.text, at: message.editedAt }] : [])]
+      .filter((edit) => {
+        const key = `${edit.at}|${edit.text}`;
+        return !seen.has(key) && seen.add(key);
+      })
+      .sort((left, right) => (left.at < right.at ? -1 : left.at > right.at ? 1 : 0));
+    return {
+      ...(stale ? { text: previous.text, editedAt: previous.editedAt } : {}),
+      ...(edits.length ? { edits } : {}),
+    };
+  }
+
   function mergeMessages(...batches) {
     const known = new Map();
+    const byMid = new Map();
 
     for (const batch of batches) {
       if (!Array.isArray(batch)) {
@@ -780,8 +820,12 @@
           continue;
         }
 
-        const key = getMessageKey(message);
+        const key = findByMid(message, known, byMid) || getMessageKey(message);
         const previous = known.get(key);
+        if (message.mid) {
+          byMid.set(message.mid, key);
+        }
+
         if (!previous) {
           known.set(key, message);
           continue;
@@ -790,8 +834,11 @@
         known.set(key, {
           ...previous,
           ...message,
+          // Номер разобранного у будильщика — прежний id копии.
+          id: previous.id || message.id,
           attachments: previous.attachments?.length ? previous.attachments : message.attachments,
           replyTo: message.replyTo || previous.replyTo || null,
+          ...mergeChanges(previous, message),
         });
       }
     }
@@ -805,6 +852,67 @@
 
       return Number(left.id || 0) - Number(right.id || 0);
     });
+  }
+
+  // Удалённое сообщение Kwork просто перестаёт отдавать. Первая страница истории содержит всё, что новее
+  // её самого старого сообщения (windowFrom): сохранённой реплики новее этой точки в ответе нет — она удалена.
+  // Реплика остаётся в переписке с отметкой: агент знает, что было сказано и что это отозвано.
+  function markDeleted(messages, fresh, windowFrom, now) {
+    const from = Date.parse(windowFrom);
+    const present = new Set();
+    for (const message of Array.isArray(fresh) ? fresh : []) {
+      if (message?.id) present.add(String(message.id));
+      if (message?.mid) present.add(String(message.mid));
+      // Двойная отправка лежит на диске одной записью с номером первой копии: удалили её — вторая жива.
+      present.add(`same:${getNaturalKey(message)}`);
+    }
+
+    if (!Number.isFinite(from) || present.size === 0) {
+      return messages;
+    }
+
+    return messages.map((message) => {
+      if (!message?.id || message.event || !(Date.parse(message.time) > from)) {
+        return message;
+      }
+
+      if (present.has(String(message.id)) || (message.mid && present.has(String(message.mid))) || present.has(`same:${getNaturalKey(message)}`)) {
+        if (!message.deletedAt) return message;
+        const { deletedAt, deletedQuiet, ...restored } = message;
+        return restored;
+      }
+
+      return message.deletedAt ? message : { ...message, deletedAt: now };
+    });
+  }
+
+  // Выкладка учёта правок (1.41.0). Правка раньше — давняя, агенту не новость: время правки знает Kwork.
+  // shortcut: дата вшита, при следующем переходе формата заменить отметкой в данных моста.
+  const CHANGES_TRACKED_SINCE = '2026-11-22T15:00:00.000Z';
+
+  // Отметка правки или удаления для будильщика: меняется с каждой новой правкой. Давние правки и
+  // удаления, найденные первой сверкой старого диалога (deletedQuiet), агенту не шлются.
+  function changeMark(message) {
+    const edits = (message?.edits || []).filter((edit) => edit.at >= CHANGES_TRACKED_SINCE).length;
+    const deleted = Boolean(message?.deletedAt) && !message.deletedQuiet;
+    return edits || deleted ? `${edits}${deleted ? 'd' : ''}` : null;
+  }
+
+  // Первая сверка удалений диалога, записанного до выкладки: пропажа реплики старше выкладки могла
+  // случиться когда угодно раньше — отметка остаётся, но агента не будит.
+  // Только пропавшие в этой записи (checkedAt): отметку, уже показанную агенту, не перекрашивать.
+  function quietOldDeletions(messages, checkedAt) {
+    return messages.map((message) => (message?.deletedAt === checkedAt && message.time < CHANGES_TRACKED_SINCE ? { ...message, deletedQuiet: true } : message));
+  }
+
+  // Короткая пометка для побудки и сводки: «(удалено)» или «(изменено, было: «…»)».
+  function changeNote(message, clip) {
+    if (message?.deletedAt) {
+      return '(удалено)';
+    }
+
+    const before = message?.edits?.[message.edits.length - 1]?.text;
+    return before ? `(изменено, было: «${clip(before)}»)` : '';
   }
 
   function isInboxPage(href) {
@@ -1375,7 +1483,8 @@
         key: String(item.username).trim(),
         userId: String(item.USERID),
         lastTime: normalizeTime(item.time),
-        lastId: item.MID ? String(item.MID) : null,
+        // Отметка «просмотрено»: правка последнего сообщения не меняет MID, поэтому в ней и время правки.
+        lastId: item.MID ? `${item.MID}${item.lastMessage?.updated_at ? `~${item.lastMessage.updated_at}` : ''}` : null,
         lastFromId: item.MSGFROM ? String(item.MSGFROM) : null,
         unread: Number(item.unread_count) || 0,
         // Последнее в диалоге — сообщение внутри заказа (type 'track').
@@ -1615,7 +1724,12 @@
         continue;
       }
 
-      lines.push(`## ${resolveAuthorLabel(message, dialog)} — ${formatMessageTime(message.time)}`);
+      // Пометка — после времени: подпись цитаты ищет заголовок реплики по началу строки.
+      // Удаление видно только при перечитывании диалога: время — когда замечено, а не когда удалили.
+      const change = message.deletedAt
+        ? ` (удалено, замечено ${formatMessageTime(message.deletedAt)})`
+        : message.editedAt ? ` (изменено ${formatMessageTime(message.editedAt)})` : '';
+      lines.push(`## ${resolveAuthorLabel(message, dialog)} — ${formatMessageTime(message.time)}${change}`);
       lines.push('');
       if (message.event) {
         lines.push(`[${describeInboxEvent(message.event)}]`);
@@ -1644,6 +1758,14 @@
         lines.push('');
       }
 
+      for (const edit of message.edits || []) {
+        lines.push(`> Текст до правки ${formatMessageTime(edit.at)}:`);
+        for (const line of String(edit.text).split('\n')) {
+          lines.push(`> ${line.replace(/^(\s*)(#+)/, '$1\\$2')}`.trimEnd());
+        }
+        lines.push('');
+      }
+
       if (message.attachments?.length) {
         lines.push('Вложения:');
         for (const attachment of message.attachments) {
@@ -1664,6 +1786,10 @@
     DIALOG_MARKDOWN_NAME,
     buildDialogSlug,
     belongsToDialog,
+    changeMark,
+    quietOldDeletions,
+    changeNote,
+    markDeleted,
     buildHistoryProbes,
     buildHistoryRequest,
     collectMessages,

@@ -885,6 +885,8 @@ async function syncDialog(item, saved, fileRetries, { files: withFiles = true } 
   });
   let clientId = core.findParticipantId(firstPayload, item.key) || item.userId;
   let messages = core.filterDialogMessages(core.collectMessages(firstPayload), { dialogKey: item.key, clientId });
+  // Всё, что новее самого старого сообщения первой страницы, в ней есть: остального Kwork больше не отдаёт.
+  const windowFrom = core.getOldestMessage(messages)?.time || null;
   let complete;
   let strategy = null;
   let throttled = false;
@@ -922,6 +924,7 @@ async function syncDialog(item, saved, fileRetries, { files: withFiles = true } 
     // Первая страница сошлась с сохранённой историей — пропуска до её конца нет.
     verified: !fullNeeded,
     updatedAt: new Date().toISOString(),
+    windowFrom,
     messages,
   };
 
@@ -1184,7 +1187,7 @@ async function recheckOpenOffers() {
     if (messages.length > 0) {
       await request({
         command: 'save-dialog',
-        dialog: { key: item.key, title: item.key, url: `${KWORK_ORIGIN}/inbox/${item.key}`, clientId, updatedAt: new Date().toISOString(), messages },
+        dialog: { key: item.key, title: item.key, url: `${KWORK_ORIGIN}/inbox/${item.key}`, clientId, updatedAt: new Date().toISOString(), windowFrom: core.getOldestMessage(messages).time, messages },
       });
     }
 

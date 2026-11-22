@@ -173,7 +173,13 @@ function saveDialog(targetDir, { dialog: received, sample }) {
   const knownTimes = new Map(fl ? (previous?.messages || []).map((message) => [String(message?.id), message?.time]) : []);
   const incoming = (dialog?.messages || []).map((message) => (knownTimes.get(String(message?.id)) ? { ...message, time: knownTimes.get(String(message.id)) } : message));
   const merged = core.mergeMessages(previous?.messages, incoming);
-  const messages = source ? merged : core.filterDialogMessages(merged, dialogContext);
+  const kept = source ? merged : core.filterDialogMessages(merged, dialogContext);
+  // windowFrom шлёт только выгрузка первой страницы Kwork: по ней видно удалённое.
+  const checkedAt = new Date().toISOString();
+  const checked = !source && dialog.windowFrom ? core.markDeleted(kept, dialog.messages, dialog.windowFrom, checkedAt) : kept;
+  // Новый диалог давних удалений не знает: каждая его реплика была жива при записи.
+  const deletionsChecked = Boolean(!previous || previous.deletionsChecked || (!source && dialog.windowFrom));
+  const messages = previous && !previous.deletionsChecked && deletionsChecked ? core.quietOldDeletions(checked, checkedAt) : checked;
   // Точка сверки — последнее сообщение, до которого история на диске сплошная. Двигает
   // её только выгрузка, подтвердившая сплошность (verified или полная история), и только
   // до конца своей пачки. Тихая запись (getnewmessages не видит сообщений заказа) и
@@ -197,6 +203,7 @@ function saveDialog(targetDir, { dialog: received, sample }) {
     verifiedTime,
     ownerId: dialog.ownerId || previous?.ownerId || null,
     updatedAt: dialog.updatedAt || new Date().toISOString(),
+    deletionsChecked,
     messages,
     // События заказов (опции, оплата, сдача) пишет отдельная команда; переписка их не трогает.
     events: Array.isArray(previous?.events) ? previous.events : [],
@@ -596,6 +603,8 @@ function saveOrderEvents(targetDir, { dialogKey, clientId, orderId, events }) {
     ownerId: previous?.ownerId ?? null,
     updatedAt: new Date().toISOString(),
     messages: Array.isArray(previous?.messages) ? previous.messages : [],
+    // Запись без переписки сообщений не знает — давних удалений в ней нет.
+    deletionsChecked: previous ? Boolean(previous.deletionsChecked) : true,
     events: merged,
     samples: previous?.samples || [],
   };

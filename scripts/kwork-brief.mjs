@@ -92,7 +92,7 @@ function renderMessage(message, record, files, dialogDir, limit, missing) {
   // Предложение, оплата, «Заказ создан» — словами, а не одним заголовком Kwork.
   const event = message.event ? core.describeInboxEvent(message.event) : '';
   const own = message.event && message.text === message.event.title ? '' : clip(message.text, limit);
-  const text = [own, event ? `[${event}]` : ''].filter(Boolean).join(' ') || '(без текста)';
+  const text = [own, core.changeNote(message, (value) => clip(value, 160)), event ? `[${event}]` : ''].filter(Boolean).join(' ') || '(без текста)';
   // «Ответить» и «Цитировать» Kwork: на что именно отвечено.
   const quote = message.replyTo?.text
     ? [`  (${message.replyTo.kind === 'quote' ? 'цитата' : 'в ответ на'}: «${clip(message.replyTo.text, 160)}»)`]

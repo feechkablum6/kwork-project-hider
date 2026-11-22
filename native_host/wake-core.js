@@ -95,6 +95,8 @@ function currentEventMarks(record) {
 
   for (const message of Array.isArray(record?.messages) ? record.messages : []) {
     if (message?.id && message.event?.status) marks[`msg:${message.id}`] = message.event.status;
+    const change = core.changeMark(message);
+    if (message?.id && change) marks[`chg:${message.id}`] = change;
   }
 
   return marks;
@@ -153,6 +155,15 @@ function findWakeNews(record, { handled = null, events: seen = null, eventsSince
     if (!status || !(key in known) || known[key] === status) continue;
     // Смена статуса предложения или запроса (оплата, отказ, отмена) — событие для агента.
     events.push({ id: key, time: message.time, inbox: message.event, status, actor: 'client', wake: true });
+  }
+
+  // Правка или удаление уже разобранного сообщения. Неразобранное и так придёт целиком, с пометкой.
+  for (const message of messages.slice(0, start)) {
+    const key = `chg:${message.id}`;
+    const status = core.changeMark(message);
+    if (!status || known[key] === status) continue;
+    const time = message.deletedAt || message.edits[message.edits.length - 1].at;
+    events.push({ id: key, time, change: message, status, actor: isClientMessage(message, record) ? 'client' : 'me', wake: true });
   }
 
   if (fresh.length === 0 && events.length === 0) {
@@ -263,7 +274,20 @@ function routeLines(route, reroute) {
   return route.order ? [`Заказ ${route.order.name}: папка ${route.order.dir}.`] : [];
 }
 
+function describeChange(event) {
+  const message = event.change;
+  const own = event.actor === 'me';
+  const what = `сообщение от ${formatMoment(message.time)}`;
+  if (message.deletedAt) {
+    return `${own ? 'Вы удалили' : 'Клиент удалил'} ${what}: «${clip(message.text, WAKE_MESSAGE_CHARS)}»`;
+  }
+
+  const before = message.edits[message.edits.length - 1].text;
+  return `${own ? 'Вы изменили' : 'Клиент изменил'} ${what}. Было: «${clip(before, WAKE_MESSAGE_CHARS)}». Стало: «${clip(message.text, WAKE_MESSAGE_CHARS)}»`;
+}
+
 function describeEvent(event) {
+  if (event?.change) return describeChange(event);
   return event?.inbox ? core.describeInboxEvent(event.inbox) : core.describeTrackEvent(event);
 }
 
@@ -298,14 +322,16 @@ function buildWakeText({ wakeId, nick, record, messages, events = [], reason = '
         .filter((file) => file.messageId && String(file.messageId) === String(message.id))
         .map((file) => `  файл: ${path.join(dialogDir, core.ATTACHMENT_DIR_NAME, file.file)}`);
       const own = !isClientMessage(message, record);
-      const body = message.event ? `${message.text} [${core.describeInboxEvent(message.event)}]` : message.text;
+      const said = message.event ? `${message.text} [${core.describeInboxEvent(message.event)}]` : message.text;
+      // Пометка правки или удаления — после обрезки: длинное ТЗ не должно её съесть.
+      const body = [clip(said, WAKE_MESSAGE_CHARS), core.changeNote(message, (value) => clip(value, 200))].filter(Boolean).join(' ');
       const quote = message.replyTo?.text
         ? `  (${message.replyTo.kind === 'quote' ? 'цитата' : 'в ответ на'}: «${clip(message.replyTo.text, 200)}»)`
         : null;
       const verdict = own && verdicts[message.id] ? `  (${verdicts[message.id]})` : null;
       // В чате YouGile пишут несколько человек — у чужого сообщения имя автора.
       const who = own ? 'Вы: ' : record?.source === 'yougile' && message.authorName ? `«${clip(message.authorName, 60)}»: ` : '';
-      text = [`[${formatMoment(message.time)}] ${who}${clip(body, WAKE_MESSAGE_CHARS) || '(без текста)'}`, quote, verdict, ...attached].filter(Boolean).join('\n');
+      text = [`[${formatMoment(message.time)}] ${who}${body || '(без текста)'}`, quote, verdict, ...attached].filter(Boolean).join('\n');
     }
 
     if (rendered.length > 0 && used + text.length > WAKE_TEXT_CHARS) {
