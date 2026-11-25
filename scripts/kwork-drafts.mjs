@@ -316,7 +316,7 @@ export function readLastTurn(transcriptLines) {
     .map((entry) => ({ uuid: entry.uuid || null, at: entry.timestamp || null, text: contentText(entry.message?.content) }))
     .filter((entry) => entry.text.trim());
 
-  return { prompt, replies };
+  return { prompt, promptAt: start >= 0 ? entries[start].timestamp || null : null, replies };
 }
 
 function uniqueProject(...texts) {
@@ -777,6 +777,35 @@ function contextFor(cwd, paths) {
   return { order: context.order, nicks: findOrderNicks(context.orderDir, slugs, readOrderMap(paths.orderMapPath)) };
 }
 
+// Проекты из sent-log подборки, отправленные начиная с этого хода (время там местное, до минуты).
+function sentThisTurn(home, turn) {
+  const ids = new Set();
+  const start = Date.parse(turn.promptAt || turn.replies[0]?.at || '');
+  if (!Number.isFinite(start)) {
+    return ids;
+  }
+
+  let text = '';
+  try {
+    text = readFileSync(join(home, '.claude', 'skills', 'kwork-otklik', 'data', 'sent-log.jsonl'), 'utf8');
+  } catch {
+    return ids;
+  }
+
+  for (const line of text.split('\n')) {
+    try {
+      const row = JSON.parse(line);
+      if (Date.parse(row.sent) >= start - 60 * 1000) {
+        ids.add(String(row.wantId));
+      }
+    } catch {
+      // Пустая или недописанная строка журнала.
+    }
+  }
+
+  return ids;
+}
+
 export function capture(input, options = {}) {
   const paths = resolvePaths(options);
   if (!input?.transcript_path || !existsSync(input.transcript_path)) {
@@ -806,8 +835,10 @@ export function capture(input, options = {}) {
   }
 
   const offersFile = readJson(join(paths.targetDir, 'data', '_offers.json'));
+  // Подборка шлёт отклики сама до конца хода: расширение могло уже внести их в снимок.
+  const sentNow = sentThisTurn(paths.home, turn);
   for (const draft of drafts.filter((item) => item.kind === 'offer')) {
-    draft.offerBaseline = offerBaseline(offersFile, draft.projectId);
+    draft.offerBaseline = offerBaseline(offersFile, sentNow.has(draft.projectId) ? null : draft.projectId);
   }
 
   mkdirSync(paths.pendingDir, { recursive: true });

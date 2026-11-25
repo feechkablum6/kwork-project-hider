@@ -697,3 +697,49 @@ test('агент поправил черновик и не повторил «О
   capture(input, options);
   assert.deepEqual(parts(), [['plain', null, 'И ещё: выложил на оба стенда.', false]]);
 });
+
+test('отклик подборки, попавший в снимок откликов до конца хода, засчитывается по sent-log', async () => {
+  const { capture, listPending, resolveDrafts } = await load();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kph-drafts-'));
+  const kworkRoot = path.join(home, 'Projects', 'Kwork');
+  const targetDir = path.join(kworkRoot, 'переписки');
+  const dataDir = path.join(home, 'data');
+  fs.mkdirSync(path.join(targetDir, 'data'), { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(path.join(dataDir, 'sent.md'), '# Журнал\n');
+  // Расширение перечитало отклики между отправкой №1 и концом хода; №2 — отклик прошлых дней.
+  const offersFile = { updatedAt: at(10), offers: [
+    { offerId: '500', projectId: '3273795', price: 6500, days: 3, text: 'Прогоню DBackup по чек-листу и пришлю отчёт' },
+    { offerId: '400', projectId: '3270000', price: 2000, days: 2, text: 'Давний отклик' },
+  ] };
+  fs.writeFileSync(path.join(targetDir, 'data', '_offers.json'), JSON.stringify(offersFile));
+  // sent-log подборки пишет местное время до минуты.
+  const local = (iso) => {
+    const d = new Date(iso);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
+  const logDir = path.join(home, '.claude', 'skills', 'kwork-otklik', 'data');
+  fs.mkdirSync(logDir, { recursive: true });
+  fs.writeFileSync(path.join(logDir, 'sent-log.jsonl'), [
+    { wantId: 3270000, sent: local(at(-24 * 60)) },
+    { wantId: 3273795, sent: local(at(2)) },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n');
+
+  const block = (n, id, title) => `Отправил на №${n} «${title}»:\n\nНазвание заказа: ${title}\n\nЦена: 6 500 ₽\n\nСрок: 3 дня\n\nhttps://kwork.ru/projects/${id}`;
+  const transcript = path.join(home, 't.jsonl');
+  fs.writeFileSync(transcript, [
+    { type: 'user', timestamp: AT, message: { content: 'Файл подборки: /tmp/pick.json' } },
+    { type: 'assistant', uuid: 'u1', timestamp: at(12), message: { content: [{ type: 'text', text: `${block(1, 3273795, 'Протестирую DBackup')}\n\n${block(2, 3270000, 'Старый проект')}` }] } },
+  ].map((item) => JSON.stringify(item)).join('\n'));
+
+  const options = { home, kworkRoot, targetDir, dataDir };
+  capture({ session_id: 's1', transcript_path: transcript, cwd: kworkRoot }, options);
+  const pending = listPending(options);
+  assert.equal(pending.length, 2);
+
+  const results = resolveDrafts({ pending, dialogs: [], offersFile, claimed: [], now: Date.parse(at(20)) });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].draft.projectId, '3273795');
+  assert.match(results[0].line, /отправлено \(с биржи, авто\): 6 500 ₽ \/ 3 дн/);
+});
