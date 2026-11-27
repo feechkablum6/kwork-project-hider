@@ -14,7 +14,8 @@ const { messageCommand, withT3 } = require('./t3-client');
 const T3_TIMEOUT_MS = 30 * 1000;
 // Новый чат при холодном T3 стартует дольше; убитый по сроку старт мог успеть завести чат — повтор дал бы второй.
 const T3_START_TIMEOUT_MS = 2 * 60 * 1000;
-const T3_MODEL = ['--provider', 'claudeAgent', '--model', 'claude-opus-5-5'];
+// Новые чаты заказов — Opus 5.5 на High (просьба пользователя 27.11.2026), иначе T3 берёт medium по умолчанию.
+const T3_MODEL = ['--provider', 'claudeAgent', '--model', 'claude-opus-5-5', '--option', 'effort=high'];
 // Чаты задач по расписанию и побочные чаты — не чаты заказа (t3-task.sh в agent-stack, импорт из Desktop).
 const NOT_ORDER_CHAT = ['<scheduled-task', 'Background (from the session', 'Подборка проектов Kwork', 'Подборка заказов FL.ru', 'Разбор откликов Kwork', 'Разбор Директа'];
 

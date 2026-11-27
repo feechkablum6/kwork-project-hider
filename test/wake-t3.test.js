@@ -337,7 +337,7 @@ test('t3-runner: свежий чат заказа без задач по рас�
   for (const gone of ['deleted', 'archived', 'missing', 'vanished']) assert.equal(await t3.send(gone, 'текст'), false, gone);
   assert.equal(sent.length, 2);
   assert.equal(await t3.start('/x', 'osetr', 'первое'), 'mcp:new');
-  assert.deepEqual(calls.at(-1).args, ['thread', 'start', '/x', '-', '--title', 'osetr', '--provider', 'claudeAgent', '--model', 'claude-opus-5-5', '--json']);
+  assert.deepEqual(calls.at(-1).args, ['thread', 'start', '/x', '-', '--title', 'osetr', '--provider', 'claudeAgent', '--model', 'claude-opus-5-5', '--option', 'effort=high', '--json']);
   assert.equal(t3.threadId('11111111-2222-4333-8444-555555555555'), 'import:claudeAgent:11111111-2222-4333-8444-555555555555');
   assert.equal(t3.threadId('mcp:x'), 'mcp:x');
   await t3.removeProject('/x');
